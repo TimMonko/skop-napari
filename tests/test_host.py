@@ -10,8 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from skop import Role, op
-from skop import spec as spec_of
+from skop import OpSpec, Role, op
 from skop.types import ImageOf, LabelsOf
 from skop_core import InProcess, Recorder, SimpleStore
 from skop_napari._host import SKOP, Host, UnknownLayer, UnknownOp
@@ -29,8 +28,8 @@ def threshold(image: ImageOf[np.ndarray]) -> LabelsOf[np.ndarray]:
     return (np.asarray(image) > 0).astype(np.uint8)
 
 
-BLUR = spec_of(blur).name
-THRESHOLD = spec_of(threshold).name
+BLUR = OpSpec.from_op(blur).name
+THRESHOLD = OpSpec.from_op(threshold).name
 REGISTRY = {BLUR: blur, THRESHOLD: threshold}
 
 

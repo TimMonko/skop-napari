@@ -38,6 +38,7 @@ class OpRun:
         kwargs: dict[str, Any],
         *,
         plans: dict[str, Any] | None = None,
+        run_kwargs: dict[str, Any] | None = None,
         on_progress: Callable[[str | None, int | None, int | None], None],
         on_done: Callable[[Any], None],
         on_error: Callable[[Exception], None],
@@ -71,6 +72,7 @@ class OpRun:
                 plans=plans or None,
                 on_progress=report,
                 on_start=self._started,
+                **(run_kwargs or {}),
             )
 
         # NB: the callbacks go through _connect rather than being connected

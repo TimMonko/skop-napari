@@ -18,6 +18,7 @@ has no identity field and is frozen.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -26,14 +27,15 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from skop import Role
-from skop import spec as spec_of
+from skop import OpSpec, Role
 from skop_core import Handle, Recorder
 from skop_visual import GraphView
 from skop_visual import view as build_view
 
 #: The key a layer's bookkeeping lives under, in ``layer.metadata``.
 SKOP = "skop"
+
+_log = logging.getLogger("skop_napari")
 
 
 def _new_id() -> str:
@@ -103,6 +105,8 @@ class _View:
     handle: Handle
     #: The exact object the store was given or handed back, for identity.
     array: np.ndarray
+    #: Which of the step's outputs this draws, when the step has several.
+    output: str | None = None
 
 
 class Host:
@@ -117,7 +121,8 @@ class Host:
     registry
         The ops this host can name, by ID -- ``OpSpec.name``, as ``discover()``
         reports it. Needed to resolve a step's op, and to read the role its
-        output is drawn with.
+        output is drawn with. Kept as given rather than copied, so a registry
+        that imports an op only when asked for it stays lazy.
     """
 
     def __init__(
@@ -128,7 +133,9 @@ class Host:
     ) -> None:
         self.recorder = recorder
         self.display = display
-        self.registry = dict(registry or {})
+        self.registry: Mapping[str, Callable[..., Any]] = (
+            {} if registry is None else registry
+        )
         #: Every layer the host linked, by the id it issued that layer.
         self._views: dict[str, _View] = {}
         self._writing = 0
@@ -141,12 +148,21 @@ class Host:
         Call it when layers appear. Idempotent: a layer already carrying the
         link is left alone, which is also what makes a copy of a layer
         harmless.
+
+        A layer whose data is not an array -- a shapes layer holds a list of
+        vertex arrays -- cannot be stored, and is skipped rather than taking
+        the layers after it down too. It stays undeclared, so an op handed it
+        is refused in words by the recorder rather than recorded wrongly.
         """
         declared = []
         for layer in self.display.layers():
             if self.linked(layer):
                 continue
-            self.declare_root(layer)
+            try:
+                self.declare_root(layer)
+            except Exception:  # noqa: BLE001 -- see above.
+                _log.warning("Could not declare %r as a root", layer.name)
+                continue
             declared.append(layer.name)
         return declared
 
@@ -176,6 +192,36 @@ class Host:
         }
         self._views[view_id] = _View(view_id, None, handle, array)
         return handle
+
+    def link(
+        self, step: str, output: str, shown: np.ndarray
+    ) -> dict[str, Any] | None:
+        """The metadata that makes a layer a view of a step's current output.
+
+        For a caller that draws the layer itself -- a panel that has already
+        run an op, and knows how it wants the result shown -- where :meth:`show`
+        is for a host that draws it. Put the dict in the layer's metadata under
+        :data:`SKOP` when the layer is created, so the link is there before
+        anyone is told the layer exists.
+
+        ``shown`` is the object the layer will hold, and what an edit is
+        measured against: a layer whose data is still that object has not been
+        touched. None when the step has no such output.
+        """
+        run = self.recorder.graph().current(step)
+        handle = None if run is None else run.outputs.get(output)
+        if run is None or handle is None:
+            return None
+        existing = self._view_of_step(step, output)
+        view_id = existing.id if existing is not None else _new_id()
+        self._views[view_id] = _View(view_id, step, handle, shown, output)
+        return {
+            "id": view_id,
+            "step": step,
+            "handle": handle,
+            "run": run.id,
+            "output": output,
+        }
 
     def array_for(self, layer: Layer) -> np.ndarray:
         """The stored array a layer stands for, for handing to an op.
@@ -293,7 +339,7 @@ class Host:
         fn = self.registry.get(op_id)
         if fn is None:
             return None
-        for found in spec_of(fn).output_specs:
+        for found in OpSpec.from_op(fn).outputs:
             if found.name == output:
                 return found.role
         return None
@@ -345,9 +391,13 @@ class Host:
         view_id = self._id_of(layer)
         return None if view_id is None else self._views.get(view_id)
 
-    def _view_of_step(self, step: str) -> _View | None:
+    def _view_of_step(
+        self, step: str, output: str | None = None
+    ) -> _View | None:
         for view in self._views.values():
-            if view.step == step:
+            if view.step == step and (
+                output is None or view.output in (None, output)
+            ):
                 return view
         return None
 

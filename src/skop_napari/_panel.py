@@ -17,7 +17,6 @@ serves both, differing only in which half of the collection it offers.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import Any
 
@@ -52,6 +51,7 @@ from ._roles import (
     value_for,
 )
 from ._run import OpRun, outputs_of, resolve
+from ._session import Session, session_for
 from ._widget import Inputs, build_inputs
 
 # Output names too generic to serve as layer names on their own. "boxes" is
@@ -147,19 +147,26 @@ class OpsPanel(Container):
         # and napari constructs the panel with no viewer at all, leaving
         # nowhere to put an op's output.
         self._viewer = napari_viewer
-        # One Runner for the session: workers stay warm between invocations,
-        # which is most of why running an op a second time is fast.
-        #
-        # napari constructs this widget itself, so there is no call site to
-        # pass debug=True at; SKOP_NAPARI_DEBUG is the way in. It echoes the
-        # worker's own stdout and stderr, which is the only view of what the
-        # op is doing inside its own process.
+        # One Runner for the viewer, shared with the other panels through the
+        # session: workers stay warm between invocations, which is most of why
+        # running an op a second time is fast. Without a viewer there is no
+        # session to share, and the panel keeps a runner of its own.
+        self._session: Session | None = (
+            session_for(napari_viewer, runner=runner)
+            if napari_viewer is not None
+            else None
+        )
         self._runner = (
-            runner
+            self._session.runner
+            if self._session is not None
+            else runner
             if runner is not None
-            else Runner(debug=bool(os.environ.get("SKOP_NAPARI_DEBUG")))
+            else Runner()
         )
         self._run: OpRun | None = None
+        #: The step the run in flight was recorded as, told to us from the
+        #: worker thread and read back on the GUI thread once it is done.
+        self._recorded: list[str] = []
 
         self._specs, self._failures = discover()
         self._by_label = {
@@ -400,11 +407,24 @@ class OpsPanel(Container):
             calls = max(plan.calls for plan in plans.values())
             self._progress.label = f"Preparing environment: {spec.env} ({calls} runs)"
 
+        # While a session is recording, the run goes through the listening
+        # runner instead of the plain one. It is the same call either way: the
+        # op still runs in its environment, off this thread, and the only
+        # difference is that it is written down on the way past.
+        executor: Any = self._runner
+        run_kwargs: dict[str, Any] = {}
+        self._recorded = []
+        if self._session is not None and self._session.recording:
+            self._session.declare_roots()
+            executor = self._session.executor
+            run_kwargs["on_recorded"] = self._recorded.append
+
         self._run = OpRun(
-            self._runner,
+            executor,
             spec,
             args,
             plans=plans,
+            run_kwargs=run_kwargs,
             on_progress=self._on_progress,
             on_done=self._on_done,
             on_error=self._on_error,
@@ -494,7 +514,14 @@ class OpsPanel(Container):
                 )
                 args = self._layer_args(name, data)
                 args.update(extra)
-                self._viewer.add_layer(Layer.create(data, args, layer_type))
+                if self._recorded and self._session is not None:
+                    # Drawn as the layer that stands for the recorded step,
+                    # so the Record panel can tell it from an input.
+                    self._session.draw(
+                        self._recorded[0], output.name, data, layer_type, args
+                    )
+                else:
+                    self._viewer.add_layer(Layer.create(data, args, layer_type))
 
         self._show_scalars(scalars)
 
@@ -550,6 +577,9 @@ class OpsPanel(Container):
         """
         _log.error("Op %s failed", self.spec.name, exc_info=exc)
         notification_manager.receive_error(type(exc), exc, exc.__traceback__)
+        # A failed run is recorded too, and the table should say so.
+        if self._session is not None and self._session.recording:
+            self._session.changed.emit()
 
     def _on_finish(self) -> None:
         self._run = None
