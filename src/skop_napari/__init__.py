@@ -1,13 +1,16 @@
 """Run scikit-ops ops from napari.
 
-Exposes one widget, the Ops panel, which lists every op skop can discover and
+Exposes three widgets. The Ops panel lists every op skop can discover and
 runs the chosen one in its own Appose environment -- off the GUI thread, with
 progress and cancellation, and with its outputs added to the viewer as the
-layer types their roles call for.
+layer types their roles call for. The Workflows panel is the same panel
+showing the other half of the collection. The Record panel runs an op and
+writes the call down, so a session can be replayed or exported later.
 """
 
 from __future__ import annotations
 
 from ._panel import OpsPanel, WorkflowsPanel
+from ._record import RecordPanel
 
-__all__ = ["OpsPanel", "WorkflowsPanel"]
+__all__ = ["OpsPanel", "RecordPanel", "WorkflowsPanel"]

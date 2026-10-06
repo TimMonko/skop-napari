@@ -27,6 +27,7 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "scikit-ops",
+    "skop-workflows",
     "napari>=0.5",
     "magicgui>=0.8",
     "numpy",
@@ -56,6 +57,7 @@ packages = ["src/skop_napari"]
 [tool.uv.sources]
 # Developed alongside its base package; drop this once scikit-ops is on PyPI.
 scikit-ops = { path = "../scikit-ops", editable = true }
+skop-workflows = { path = "../skop-workflows", editable = true }
 # Note: the main tip, not the 0.11 release, for PixiInstallMonitor -- it is
 # what gives an environment build real progress to show. Matches the pin in
 # scikit-ops; both move back to the registry once a release carries it.
@@ -66,7 +68,7 @@ appose = { path = "../appose-python", editable = true }
 line-length = 88
 
 [tool.ruff.lint.isort]
-known-first-party = ["skop", "skop_napari"]
+known-first-party = ["skop", "skop_core", "skop_napari", "skop_visual"]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]

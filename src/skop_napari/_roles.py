@@ -113,6 +113,16 @@ def layer_type_for(output: OutputSpec) -> str | None:
     return None
 
 
+def layer_type_for_role(role: Role | None) -> str | None:
+    """The napari layer type a role becomes, when the role says.
+
+    :func:`layer_type_for` answers this for a whole output, which also weighs
+    up whether the output is a layer at all. A recorder drawing what a run
+    produced knows the role and nothing else, so it asks this instead.
+    """
+    return None if role is None else _LAYER_TYPES.get(role)
+
+
 def value_for(param: ParamSpec, value: Any) -> Any:
     """What an op wants, given what the widget for *param* is holding.
 

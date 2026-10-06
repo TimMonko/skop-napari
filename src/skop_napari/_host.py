@@ -1,0 +1,375 @@
+"""The recording host: layers in, runs out, layers back.
+
+A host owns a recorder and a *display* -- whatever is showing layers. The
+recorder speaks only in ops and handles; the display knows only about names,
+data and metadata. This module is what turns one into the other, and it imports
+no napari, so everything it decides is exercised by tests that need no viewer.
+
+A layer is a *view* of one step's output, or of a root. The link lives in
+``layer.metadata[SKOP]``: a live dict, copied when a layer is created and
+carried in ``as_layer_data_tuple``, so it survives a layer copy, and assigning
+into it emits nothing, so our bookkeeping never looks like a user edit.
+
+The link carries an id the host issues, and that id -- not the layer's name --
+is what the host knows a layer by. A name is only a label, and renaming a layer
+must change nothing. napari's ``layer.source`` cannot serve instead: ``Source``
+has no identity field and is frozen.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+import numpy as np
+
+from skop import Role
+from skop import spec as spec_of
+from skop_core import Handle, Recorder
+from skop_visual import GraphView
+from skop_visual import view as build_view
+
+#: The key a layer's bookkeeping lives under, in ``layer.metadata``.
+SKOP = "skop"
+
+
+def _new_id() -> str:
+    """An id for a layer, issued once and kept in its metadata."""
+    return uuid.uuid4().hex[:12]
+
+
+def _is_layer(value: Any) -> bool:
+    """Whether a value is a layer rather than the array itself.
+
+    A panel hands over the layer a user picked; an update hands over the array
+    a step already read. Only a layer has metadata, so that is the tell.
+    """
+    return hasattr(value, "data") and hasattr(value, "metadata")
+
+
+class UnknownLayer(ValueError):
+    """A layer reached an op without this host having declared it."""
+
+
+class UnknownOp(KeyError):
+    """A step named an op this host has no entry for."""
+
+
+class Layer(Protocol):
+    """One layer, as much of it as a host needs to see."""
+
+    name: str
+    data: Any
+    metadata: dict[str, Any]
+
+
+class Display(Protocol):
+    """Where layers are shown: everything the host asks of a viewer.
+
+    Two methods, because that is the whole of what a host needs. A viewer that
+    can list its layers and put one there is a host's display.
+
+    ``show`` finds the layer that already draws ``step`` -- by the link in its
+    metadata, never by its name -- and replaces the data, and the layer type if
+    the role wants another one. It creates a layer named ``name`` when the step
+    has none. It is the display that knows what a role means to a viewer: an op
+    whose output says ``Role.labels`` gets a labels layer, not an image one.
+    """
+
+    def layers(self) -> Sequence[Layer]: ...
+
+    def show(
+        self,
+        name: str,
+        data: np.ndarray,
+        *,
+        step: str,
+        role: Role | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Layer: ...
+
+
+@dataclass(frozen=True)
+class _View:
+    """What the host remembers about one layer it linked."""
+
+    #: The id the host issued the layer, and wrote into its metadata.
+    id: str
+    #: The step this layer draws, or None when the layer is a root.
+    step: str | None
+    handle: Handle
+    #: The exact object the store was given or handed back, for identity.
+    array: np.ndarray
+
+
+class Host:
+    """A recorder and a display, kept in step.
+
+    Parameters
+    ----------
+    recorder
+        Where runs are recorded and arrays are stored.
+    display
+        Where layers are shown.
+    registry
+        The ops this host can name, by ID -- ``OpSpec.name``, as ``discover()``
+        reports it. Needed to resolve a step's op, and to read the role its
+        output is drawn with.
+    """
+
+    def __init__(
+        self,
+        recorder: Recorder,
+        display: Display,
+        registry: Mapping[str, Callable[..., Any]] | None = None,
+    ) -> None:
+        self.recorder = recorder
+        self.display = display
+        self.registry = dict(registry or {})
+        #: Every layer the host linked, by the id it issued that layer.
+        self._views: dict[str, _View] = {}
+        self._writing = 0
+
+    # -- roots -----------------------------------------------------------
+
+    def declare_roots(self) -> list[str]:
+        """Declare every layer this session has not seen as a root.
+
+        Call it when layers appear. Idempotent: a layer already carrying the
+        link is left alone, which is also what makes a copy of a layer
+        harmless.
+        """
+        declared = []
+        for layer in self.display.layers():
+            if self.linked(layer):
+                continue
+            self.declare_root(layer)
+            declared.append(layer.name)
+        return declared
+
+    def linked(self, layer: Layer) -> bool:
+        """Whether this host already knows what a layer is."""
+        return SKOP in layer.metadata
+
+    def declare_root(self, layer: Layer) -> Handle:
+        """Store a layer's data as the root its own name names.
+
+        The array handed on is the one remembered, never a fresh read of the
+        layer: the store keys identity off the exact object, so a second
+        materialisation would look like a root nobody declared.
+
+        Declaring a layer that is already a root stores a new version under the
+        same name and keeps the id. That is the root moving, and whoever read
+        the old version is stale from then on.
+        """
+        array = np.asarray(layer.data)
+        view_id = self._id_of(layer) or _new_id()
+        handle = self.recorder.root(layer.name, array)
+        layer.metadata[SKOP] = {
+            "id": view_id,
+            "step": None,
+            "handle": handle,
+            "run": None,
+        }
+        self._views[view_id] = _View(view_id, None, handle, array)
+        return handle
+
+    def array_for(self, layer: Layer) -> np.ndarray:
+        """The stored array a layer stands for, for handing to an op.
+
+        A layer this host linked gives back the array the store was handed, by
+        identity. When the layer's data is no longer that exact object -- a lazy
+        layer materialised a second time, or a layer type that hands out a
+        fresh array -- the handle in the layer's own link is used instead, since
+        nothing says the data changed.
+
+        An *edited* layer is the exception, and the point of the rule: handing
+        back the recorded array would quietly discard the edit, so this refuses
+        and the user accepts or reverts first.
+        """
+        found = self._view_of(layer)
+        if found is None:
+            raise UnknownLayer(
+                f"layer {layer.name!r} is not one this host declared. Declare "
+                f"the layers the viewer holds, with host.declare_roots()."
+            )
+        if found.array is layer.data:
+            return found.array
+        if found.step is None or self.recorder.graph().is_edited(found.step):
+            raise UnknownLayer(
+                f"the data in {layer.name!r} is not what was recorded for "
+                f"{found.step!r}. Accept the edit, or revert to what the run "
+                f"produced, before running anything on it."
+            )
+        return self.recorder.store.get(found.handle)
+
+    # -- running ---------------------------------------------------------
+
+    def run(self, step: str, op_id: str, args: dict[str, Any]) -> Any:
+        """Record one op call, then draw what it made.
+
+        ``args`` maps parameter names to values. An array parameter takes the
+        layer the user picked, which the host resolves to data the store
+        already holds; everything else is a parameter, and must be JSON for the
+        recorder to accept it.
+        """
+        resolved = {
+            name: self.array_for(value) if _is_layer(value) else value
+            for name, value in args.items()
+        }
+        result = self.recorder.run(self._fn(op_id), step, resolved)
+        self.show(step)
+        return result
+
+    def update(self, step: str) -> Any:
+        """Run a stale step again, taking each input from where it now is."""
+        return self.recorder.update(self._fn(self._current(step).op), step)
+
+    def rerun(self, step: str) -> Any:
+        """Run a step again from the run it is on: its inputs, its params."""
+        return self.recorder.rerun(self._fn(self._current(step).op), step)
+
+    def produce(self, targets: list[str]) -> list[str]:
+        """Bring the targets' closure up to date, and say what that ran."""
+        return self.recorder.produce(list(targets), self.registry)
+
+    def show(self, step: str) -> list[Layer]:
+        """Draw a step's current run as its layer, linked in the metadata.
+
+        The role comes from the op, so a labels output lands in a labels layer
+        rather than an image one. An op with several outputs wants one layer
+        each, which is not built yet.
+        """
+        run = self.recorder.graph().current(step)
+        if run is None:
+            raise KeyError(f"no successful run of {step!r} to draw")
+        if len(run.outputs) > 1:
+            raise NotImplementedError(
+                f"{step!r} has {len(run.outputs)} outputs; drawing more than "
+                f"one output of a step is not built yet"
+            )
+        existing = self._view_of_step(step)
+        view_id = existing.id if existing is not None else _new_id()
+        drawn = []
+        with self.writing():
+            for name, handle in run.outputs.items():
+                array = self.recorder.store.get(handle)
+                layer = self.display.show(
+                    step,
+                    array,
+                    step=step,
+                    role=self.role_of(run.op, name),
+                    metadata={
+                        SKOP: {
+                            "id": view_id,
+                            "step": step,
+                            "handle": handle,
+                            "run": run.id,
+                        }
+                    },
+                )
+                self._views[view_id] = _View(view_id, step, handle, array)
+                drawn.append(layer)
+        return drawn
+
+    def revert(self, step: str) -> list[Layer]:
+        """Put a step's recorded output back over its layer, and unmark it.
+
+        The edit is not deleted -- the log is append-only -- but a revert mark
+        supersedes it, so the step stops being edited and nothing downstream
+        stays affected.
+        """
+        edited = self.recorder.graph().is_edited(step)
+        drawn = self.show(step)
+        if edited:
+            self.recorder.mark_reverted(step)
+        return drawn
+
+    def role_of(self, op_id: str, output: str) -> Role | None:
+        """The role an op gives one of its outputs, when the op is known."""
+        fn = self.registry.get(op_id)
+        if fn is None:
+            return None
+        for found in spec_of(fn).output_specs:
+            if found.name == output:
+                return found.role
+        return None
+
+    # -- what is drawn ---------------------------------------------------
+
+    def view(self, targets: list[str] | None = None) -> GraphView:
+        """The graph, as a panel or a Mermaid renderer draws it."""
+        return build_view(self.recorder.graph(), self.recorder.store, targets)
+
+    # -- keeping in step with the viewer ---------------------------------
+
+    @contextmanager
+    def writing(self) -> Iterator[None]:
+        """Bracket the host's own writes, so they are not read as edits."""
+        self._writing += 1
+        try:
+            yield
+        finally:
+            self._writing -= 1
+
+    def data_changed(self, layer: Layer) -> bool:
+        """Note that a layer's data changed, and say whether it mattered.
+
+        A change outside :meth:`writing` is a hand edit: the step is marked,
+        and everything downstream is affected, derived on read rather than
+        stored. A change inside the bracket is ours and means nothing. Identity
+        is compared, never contents, so re-assigning the same array is not an
+        edit and a paint that reports twice marks once.
+
+        A root is not a step, so a hand edit to one is not a mark. It is the
+        root moving: a new version goes into the store, and whoever read the
+        old one is stale.
+        """
+        if self._writing:
+            return False
+        found = self._view_of(layer)
+        if found is None or found.array is layer.data:
+            return False
+        if found.step is None:
+            self.declare_root(layer)
+            return True
+        self.recorder.mark_edited(found.step)
+        return True
+
+    # -- what the host knows a layer by ----------------------------------
+
+    def _view_of(self, layer: Layer) -> _View | None:
+        view_id = self._id_of(layer)
+        return None if view_id is None else self._views.get(view_id)
+
+    def _view_of_step(self, step: str) -> _View | None:
+        for view in self._views.values():
+            if view.step == step:
+                return view
+        return None
+
+    @staticmethod
+    def _id_of(layer: Layer) -> str | None:
+        """The id the host issued a layer, read off the layer's own link."""
+        link = layer.metadata.get(SKOP)
+        return None if link is None else link.get("id")
+
+    def _fn(self, op_id: str) -> Callable[..., Any]:
+        """The function an op ID names, or a clear refusal.
+
+        A recorder resolves no IDs -- a recipe does, through a registry -- so
+        the host is what turns an op's name back into something callable.
+        """
+        fn = self.registry.get(op_id)
+        if fn is None:
+            raise UnknownOp(f"{op_id!r} is not an op this host can run")
+        return fn
+
+    def _current(self, step: str):
+        run = self.recorder.graph().current(step)
+        if run is None:
+            raise KeyError(f"no successful run of {step!r}")
+        return run
