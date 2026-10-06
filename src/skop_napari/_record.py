@@ -1,45 +1,78 @@
-"""The Record panel: what has been run, and what to do about it.
+"""The Record panel: what has been run, where it came from, and what moved.
 
 It runs nothing. The Ops and Workflows panels run ops, as they always did, and
 while this panel is recording they run them through the session's listening
-runner (``_session``) -- so a call made anywhere, in any environment, is written
-down on its way past, and this panel is where the writing shows. It lists the
-steps, says which have gone stale or been edited by hand, and brings the ones
-you tick up to date.
+runner (``_session``), so a call made anywhere, in any environment, is written
+down on its way past. This panel is where the writing shows.
+
+Top to bottom it answers four questions. *What went in?* -- the inputs, each a
+dropdown of the layers that fit, so choosing another layer is how an input is
+changed. *How does it fit together?* -- the graph, where pointing at a node
+lights the path through it. *What is each step?* -- the table: what it read,
+what it made, with which parameters, how many times, and in what state. And
+*what do I do about it?* -- the detail of the selected step, and Produce.
 
 What a host is, and what it promises, is in ``_host``: that module imports no
 napari and is tested without a viewer. What a session is -- the one runner and
-store a viewer's panels share -- is in ``_session``. This module is the two
-things neither can supply for itself, something to draw in and somewhere to
-press buttons.
+store a viewer's panels share -- is in ``_session``. Where the nodes go and
+which are on a path is ``skop_visual``'s. This module is the part that needs
+Qt: something to draw in and somewhere to press buttons.
 """
 
 from __future__ import annotations
 
+import html
+import json
 import logging
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import napari.viewer
-from magicgui.widgets import CheckBox, Container, Label, PushButton
 from napari.qt.threading import create_worker
 from napari.utils.notifications import show_error
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QBrush, QColor
+from qtpy.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QFormLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
-from skop import OpSpec
-from skop_visual import EDITED, SIGNALS
+from skop import OpSpec, Role
+from skop_visual import EDITED, SIGNALS, Node, layout, lineage
 
+from ._graph import GraphCanvas
 from ._host import SKOP
 from ._session import Session, session_for
 
 _log = logging.getLogger("skop_napari")
 
-#: The widths the table pads its columns to, and the header that names them.
-#: Fixed because a row is one string: magicgui has no table, and the point of
-#: the wording is that a column of statuses can be read down.
-_STEP_WIDTH = 22
-_OP_WIDTH = 34
-_HEADER = f"{'step':<{_STEP_WIDTH}}{'op':<{_OP_WIDTH}}state"
+#: The table's columns. The first is the Produce tick.
+# State comes right after the step: in a narrow dock the rest scrolls, and what
+# is wrong with a step is what a reader came to see.
+_COLUMNS = ["", "step", "state", "in", "out", "params", "runs", "op"]
+_TICK, _STEP, _STATE, _IN, _OUT, _PARAMS, _RUNS, _OP = range(len(_COLUMNS))
+
+#: What a row is tinted when it is on the path through the selected step: the
+#: steps it was made from, and the steps made from it. The same two colours the
+#: graph lights its edges in.
+_UPSTREAM = QColor(26, 115, 232, 60)
+_DOWNSTREAM = QColor(132, 48, 206, 55)
+
+#: The layers an input may be, by what the ops that read it take it to be.
+#: Anything not listed is not an array an op can read as an input at all.
+_ARRAY_LAYERS = ("image", "labels")
+_LAYERS_FOR_ROLE = {Role.image: ("image",), Role.labels: ("labels",)}
 
 
 def _short_op(op: str) -> str:
@@ -54,36 +87,72 @@ def _short_op(op: str) -> str:
     return function if tail == function else f"{tail}:{function}"
 
 
-def _row_text(node: Any) -> str:
-    """One row of the table, as text.
+def _shown_run(node: Node) -> Any:
+    """The run a row describes: the one the step stands on, else the newest."""
+    return node.current or (node.runs[0] if node.runs else None)
 
-    Text rather than a painted cell: a background colour is a code the reader
-    has to learn, and the words are already written. The state is the same
-    signal the graph diagram uses, so the two read alike.
-    """
-    return (
-        f"{node.step:<{_STEP_WIDTH}}{_short_op(node.op):<{_OP_WIDTH}}"
-        f"{SIGNALS[node.badge]}"
+
+def _reads(node: Node) -> str:
+    """What a step read, as ``parameter ← where it came from``."""
+    run = _shown_run(node)
+    if run is None:
+        return ""
+    return ", ".join(
+        f"{edge.param} ← {edge.source or edge.root or '?'}" for edge in run.inputs
     )
 
 
-def _fixed_font() -> Any:
-    """A monospace font, so the table's columns line up.
-
-    Every failure here is cosmetic and every one of them is better than a
-    panel that will not open, so this never raises. The enum is scoped in Qt6
-    and unscoped in Qt5, hence the pair of getattr calls rather than one.
-    """
-    try:
-        from qtpy.QtGui import QFontDatabase
-
-        kind = getattr(QFontDatabase, "SystemFont", QFontDatabase)
-        return QFontDatabase.systemFont(kind.FixedFont)
-    except Exception:  # noqa: BLE001 -- a ragged table beats no panel.
-        return None
+def _makes(node: Node) -> str:
+    run = _shown_run(node)
+    return ", ".join(run.outputs) if run is not None else ""
 
 
-class RecordPanel(Container):
+def _setting(value: Any) -> str:
+    """A parameter's value, short enough for a cell. An op ID is an op."""
+    if isinstance(value, str) and ":" in value:
+        return _short_op(value)
+    text = value if isinstance(value, str) else json.dumps(value)
+    return text if len(text) <= 24 else text[:23] + "…"
+
+
+def _settings(node: Node) -> str:
+    run = _shown_run(node)
+    if run is None or not run.params:
+        return ""
+    return ", ".join(f"{k}={_setting(v)}" for k, v in run.params.items())
+
+
+def _runs(node: Node) -> str:
+    failed = sum(1 for run in node.runs if run.status != "ok")
+    count = len(node.runs)
+    return f"{count} ({failed} failed)" if failed else str(count)
+
+
+def _states(node: Node) -> str:
+    flags = node.flags or ("fresh",)
+    return " · ".join(SIGNALS.get(flag, flag) for flag in flags)
+
+
+def _why(node: Node) -> str:
+    """The words behind a state, for a tooltip and the detail."""
+    reasons = {
+        "stale": "An input moved after this step read it.",
+        "edited": "The result was changed by hand.",
+        "affected": "An edited step feeds this one.",
+        "failed": "The newest run failed.",
+        "missing": (
+            "The layer behind "
+            + ", ".join(repr(name) for name in node.missing)
+            + " was removed. Nothing newer exists to catch up with, so this "
+            "is not stale: it can be read, but not reproduced here."
+        ),
+    }
+    return " ".join(reasons[flag] for flag in node.flags if flag in reasons) or (
+        "Up to date."
+    )
+
+
+class RecordPanel(QWidget):
     """Shows what the session recorded, and brings steps up to date."""
 
     def __init__(
@@ -101,6 +170,7 @@ class RecordPanel(Container):
                 "needs the viewer. napari supplies one to a parameter named "
                 "'napari_viewer'."
             )
+        super().__init__()
         self._viewer = napari_viewer
         self._session: Session = session_for(
             napari_viewer, specs=specs, registry=registry, root=root
@@ -108,94 +178,125 @@ class RecordPanel(Container):
         self._host = self._session.host
         self._recorder = self._session.recorder
         #: Which steps are ticked as targets. Kept here rather than read back
-        #: out of the widgets, so rebuilding the table does not lose it.
+        #: out of the table, so rebuilding it does not lose it.
         self._targets: set[str] = set()
-        self._font = _fixed_font()
+        #: The step whose path is lit, or None.
+        self._selected: str | None = None
         #: The worker bringing steps up to date, while there is one.
         self._producing: Any = None
+        #: What the input dropdowns were last built from, so a refresh that
+        #: changes nothing about them does not close one a user has open.
+        self._inputs_made: tuple = ()
+        self._input_layers: dict[str, list[Any]] = {}
+        self._syncing = False
 
-        self._recording = CheckBox(
-            value=True,
-            text="Record what is run",
-            tooltip=(
-                "While this is on, ops run from the Ops and Workflows panels "
-                "are written down. They run exactly as they would otherwise."
-            ),
-        )
-        self._roots_heading = Label(value="Roots")
-        self._roots = Label(value="")
-        self._declare = PushButton(text="Declare the viewer's layers")
-
-        self._runs_heading = Label(
-            value="Recorded",
-            tooltip=(
-                f"The log of what was run is written to {self._session.store.log_path}."
-            ),
-        )
-        self._header = Label(value=_HEADER)
-        self._table = Container(labels=False)
-        self._produce = PushButton(text="Produce")
-
-        self._status = Label(value="")
-
-        super().__init__(
-            widgets=[
-                self._recording,
-                self._roots_heading,
-                self._roots,
-                self._declare,
-                self._runs_heading,
-                self._header,
-                self._table,
-                self._produce,
-                self._status,
-            ],
-            labels=False,
+        self._recording = QCheckBox("Record what is run")
+        self._recording.setChecked(True)
+        self._recording.setToolTip(
+            "While this is on, ops run from the Ops and Workflows panels are "
+            "written down. They run exactly as they would otherwise."
         )
 
-        self._recording.changed.connect(self._record_toggled)
-        self._declare.changed.connect(self._declare_roots)
-        self._produce.changed.connect(self._produce_)
+        self._inputs_form = QFormLayout()
+        self._inputs_empty = QLabel("Nothing yet. An op needs a layer to read.")
+        self._refresh_inputs = QPushButton("Look for new layers")
+        self._refresh_inputs.setToolTip(
+            "Take layers opened while nothing was recording as inputs, and "
+            "notice any input whose pixels changed."
+        )
+
+        self._canvas = GraphCanvas()
+        self._canvas.setToolTip(
+            "Click a step to light the path through it: blue is what it was "
+            "made from, purple is what is made from it."
+        )
+
+        self._table = QTableWidget(0, len(_COLUMNS))
+        self._table.setHorizontalHeaderLabels(_COLUMNS)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setMinimumHeight(120)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(True)
+        self._table.setToolTip(
+            f"The log of what was run is written to {self._session.store.log_path}."
+        )
+
+        self._detail = QLabel("")
+        self._detail.setWordWrap(True)
+        self._detail.setTextFormat(Qt.TextFormat.RichText)
+        self._detail.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
+        self._revert_button = QPushButton("Revert")
+        self._keep_button = QPushButton("Keep the edit")
+        self._revert_button.setVisible(False)
+        self._keep_button.setVisible(False)
+
+        self._produce = QPushButton("Produce")
+        self._produce.setToolTip("Bring the ticked steps up to date.")
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+
+        edit_row = QHBoxLayout()
+        edit_row.addWidget(self._revert_button)
+        edit_row.addWidget(self._keep_button)
+        edit_row.addStretch(1)
+        run_row = QHBoxLayout()
+        run_row.addWidget(self._produce)
+        run_row.addStretch(1)
+
+        column = QVBoxLayout(self)
+        column.addWidget(self._recording)
+        column.addWidget(QLabel("<b>Inputs</b>"))
+        column.addWidget(self._inputs_empty)
+        column.addLayout(self._inputs_form)
+        column.addWidget(self._refresh_inputs)
+        column.addWidget(QLabel("<b>Graph</b>"))
+        column.addWidget(self._canvas, 2)
+        column.addWidget(QLabel("<b>Steps</b>"))
+        column.addWidget(self._table, 3)
+        column.addWidget(self._detail)
+        column.addLayout(edit_row)
+        column.addLayout(run_row)
+        column.addWidget(self._status)
+
+        self._recording.toggled.connect(self._record_toggled)
+        self._refresh_inputs.clicked.connect(self._declare_roots)
+        self._produce.clicked.connect(self._produce_)
+        self._revert_button.clicked.connect(lambda: self._revert(self._selected))
+        self._keep_button.clicked.connect(lambda: self._keep(self._selected))
+        self._table.itemChanged.connect(self._ticked)
+        self._table.itemSelectionChanged.connect(self._row_selected)
+        self._canvas.picked.connect(self._node_picked)
         # Whatever ran an op -- the Ops panel, a script -- is told about here
         # only by the session saying its picture changed.
         self._session.changed.connect(self._refresh)
+        self._viewer.layers.selection.events.active.connect(self._layer_selected)
 
-        self._session.recording = self._recording.value
+        self._session.recording = self._recording.isChecked()
         self._refresh()
 
     # -- recording -------------------------------------------------------
 
     def _record_toggled(self, on: bool) -> None:
         self._session.recording = on
-        self._status.value = (
+        self._status.setText(
             "Recording." if on else "Not recording: ops run, and are forgotten."
         )
 
-    # -- roots -----------------------------------------------------------
-
     def _declare_roots(self) -> None:
-        """Take every layer the host has not seen as a root.
-
-        Idempotent, and safe to press twice: a layer already carrying its link
-        is left alone, which is also what makes a duplicate of a layer a view
-        of the same step rather than a new input.
-        """
+        """Take every layer the session has not seen as an input, and re-read
+        the ones it has. Idempotent, and safe to press twice."""
         self._session.declare_roots()
 
-    def _roots_text(self) -> str:
-        names = [
-            layer.name
-            for layer in self._host.display.layers()
-            if (layer.metadata.get(SKOP) or {}).get("step", "missing") is None
-        ]
-        if not names:
-            return "Nothing yet. An op needs a layer to read."
-        return ", ".join(names)
-
-    # -- what was recorded -----------------------------------------------
+    # -- refreshing ------------------------------------------------------
 
     def _refresh(self) -> None:
-        """Rebuild the table from the graph, which is the only account of it.
+        """Redraw everything from the graph, which is the only account of it.
 
         Read back from the log rather than remembered: a panel that kept its
         own idea of what had been run is a second source of truth, and the one
@@ -209,52 +310,257 @@ class RecordPanel(Container):
             self._session.changed.disconnect(self._refresh)
 
     def _rebuild(self) -> None:
+        graph = self._recorder.graph()
         view = self._host.view()
         steps = {node.step for node in view.nodes}
         self._targets &= steps
+        if self._selected not in steps:
+            self._selected = None
 
-        self._header.native.setFont(self._font) if self._font else None
-        self._table.clear()
-        for node in view.nodes:
-            row = Container(
-                widgets=[
-                    Label(value=_row_text(node)),
-                    CheckBox(value=node.step in self._targets, tooltip="Produce this"),
-                ],
-                labels=False,
+        self._rebuild_inputs(graph)
+        self._rebuild_table(view, graph)
+        self._draw_graph(view, graph)
+        self._show_detail(view, graph)
+        self._produce.setEnabled(bool(self._targets) and self._producing is None)
+
+    # -- inputs ----------------------------------------------------------
+
+    def _rebuild_inputs(self, graph: Any) -> None:
+        """One dropdown per input, of the layers that fit it.
+
+        An input is a name the graph knows, and the layer behind it can be
+        changed: choosing another layer here stores that layer's pixels under
+        the same name, so every step that read the input is stale, and Produce
+        brings them up to date on the new one.
+        """
+        names: list[str] = []
+        for root in graph.roots:
+            if root.name not in names:
+                names.append(root.name)
+
+        layers = self._host.display.layers()
+        offered: dict[str, list[Any]] = {}
+        for name in names:
+            kinds = _LAYERS_FOR_ROLE.get(self._host.root_role(name), _ARRAY_LAYERS)
+            offered[name] = [
+                layer for layer in layers if type(layer).__name__.lower() in kinds
+            ]
+        current = {name: self._host.layer_of(name) for name in names}
+        made = tuple(
+            (
+                name,
+                tuple((id(layer), layer.name) for layer in offered[name]),
+                id(current[name]),
             )
-            if self._font:
-                for widget in row:
-                    widget.native.setFont(self._font)
-            row[1].changed.connect(partial(self._tickle, node.step))
-            if EDITED in node.flags:
-                # Only an edited step needs these, so they are only built for
-                # one: a button that does nothing is worse than no button.
-                row.extend(self._edit_buttons(node.step))
-            self._table.append(row)
+            for name in names
+        )
+        self._inputs_empty.setVisible(not names)
+        if made == self._inputs_made:
+            return
+        self._inputs_made = made
+        self._input_layers = {}
 
-        self._roots.value = self._roots_text()
-        self._produce.enabled = bool(self._targets) and self._producing is None
+        while self._inputs_form.rowCount():
+            self._inputs_form.removeRow(0)
+        for name in names:
+            combo = QComboBox()
+            options = list(offered[name])
+            if current[name] is None:
+                combo.addItem("(layer removed)")
+                options.insert(0, None)
+            for layer in offered[name]:
+                combo.addItem(layer.name)
+            if current[name] is not None and current[name] in offered[name]:
+                combo.setCurrentIndex(offered[name].index(current[name]))
+            self._input_layers[name] = options
+            combo.setToolTip(
+                f"Which layer is {name!r}. Choosing another makes everything "
+                f"that read it stale."
+            )
+            # activated, not currentIndexChanged: only a person choosing
+            # reaches it, so building the box does not rebind anything.
+            combo.activated.connect(partial(self._input_chosen, name))
+            self._inputs_form.addRow(name, combo)
 
-    def _edit_buttons(self, step: str) -> list[Any]:
-        revert = PushButton(text="Revert")
-        revert.changed.connect(partial(self._revert, step))
-        keep = PushButton(text="Keep the edit")
-        keep.changed.connect(partial(self._keep, step))
-        return [revert, keep]
+    def _input_chosen(self, name: str, index: int) -> None:
+        layer = self._input_layers[name][index]
+        if layer is None:
+            return
+        self._session.bind_root(name, layer)
+        self._status.setText(
+            f"{name!r} now reads {layer.name!r}. Steps that read it are stale."
+        )
+
+    # -- the table -------------------------------------------------------
+
+    def _rebuild_table(self, view: Any, graph: Any) -> None:
+        self._syncing = True
+        try:
+            self._table.setRowCount(len(view.nodes))
+            for row, node in enumerate(view.nodes):
+                self._fill_row(row, node)
+            self._tint(graph)
+            self._select_row()
+        finally:
+            self._syncing = False
+
+    def _fill_row(self, row: int, node: Node) -> None:
+        tick = QTableWidgetItem()
+        tick.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+        tick.setCheckState(
+            Qt.CheckState.Checked
+            if node.step in self._targets
+            else Qt.CheckState.Unchecked
+        )
+        tick.setToolTip("Produce this")
+        self._table.setItem(row, _TICK, tick)
+
+        cells = {
+            _STEP: (node.step, node.step),
+            _OP: (_short_op(node.op), node.op),
+            _IN: (_reads(node), _reads(node)),
+            _OUT: (_makes(node), _makes(node)),
+            _PARAMS: (_settings(node), _settings(node)),
+            _RUNS: (_runs(node), "Runs of this step; the newest good one stands."),
+            _STATE: (_states(node), _why(node)),
+        }
+        for column, (text, tip) in cells.items():
+            item = QTableWidgetItem(text)
+            item.setToolTip(tip)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            self._table.setItem(row, column, item)
+
+    def _tint(self, graph: Any) -> None:
+        """Tint the rows on the path through the selected step."""
+        path = lineage(graph, self._selected) if self._selected else None
+        for row in range(self._table.rowCount()):
+            step = self._table.item(row, _STEP).text()
+            colour = None
+            if path is not None and step in path.upstream:
+                colour = _UPSTREAM
+            elif path is not None and step in path.downstream:
+                colour = _DOWNSTREAM
+            brush = QBrush(colour) if colour is not None else QBrush()
+            for column in range(1, len(_COLUMNS)):
+                self._table.item(row, column).setBackground(brush)
+
+    def _select_row(self) -> None:
+        self._table.clearSelection()
+        for row in range(self._table.rowCount()):
+            if self._table.item(row, _STEP).text() == self._selected:
+                self._table.selectRow(row)
+
+    def _ticked(self, item: QTableWidgetItem) -> None:
+        if self._syncing or item.column() != _TICK:
+            return
+        step = self._table.item(item.row(), _STEP).text()
+        self._tickle(step, item.checkState() == Qt.CheckState.Checked)
 
     def _tickle(self, step: str, ticked: bool) -> None:
         if ticked:
             self._targets.add(step)
         else:
             self._targets.discard(step)
-        self._produce.enabled = bool(self._targets) and self._producing is None
-        self._status.value = self._targets_line()
+        self._produce.setEnabled(bool(self._targets) and self._producing is None)
+        self._status.setText(self._targets_line())
 
     def _targets_line(self) -> str:
         if not self._targets:
             return "Tick the steps to bring up to date, then Produce."
         return f"Targets: {', '.join(sorted(self._targets))}"
+
+    # -- the graph, and what is selected ---------------------------------
+
+    def _draw_graph(self, view: Any, graph: Any) -> None:
+        path = lineage(graph, self._selected) if self._selected else None
+        self._canvas.show_graph(layout(view), path, self._selected)
+
+    def select(self, step: str | None) -> None:
+        """Point at a step: light its path, and find its layer.
+
+        What is lit is derived from the log (``skop_visual.lineage``), so this
+        stores nothing but which step is pointed at.
+        """
+        if step == self._selected:
+            return
+        self._selected = step
+        self._rebuild()
+        if step is not None:
+            self._select_layer(step)
+
+    def _row_selected(self) -> None:
+        if self._syncing:
+            return
+        rows = self._table.selectionModel().selectedRows()
+        self.select(self._table.item(rows[0].row(), _STEP).text() if rows else None)
+
+    def _node_picked(self, key: str) -> None:
+        # A root has no step to point at: clicking one clears the selection.
+        self.select(key if key and not key.startswith("root:") else None)
+
+    def _select_layer(self, step: str) -> None:
+        """Select the layer drawing a step, so it is findable in the viewer."""
+        layer = self._session.display.layer_for(step)
+        if layer is None:
+            return
+        self._syncing = True
+        try:
+            self._viewer.layers.selection.select_only(layer)
+        finally:
+            self._syncing = False
+
+    def _layer_selected(self, event: Any) -> None:
+        """A layer was picked in the viewer: point at the step that drew it."""
+        layer = event.value
+        link = getattr(layer, "metadata", {}).get(SKOP) if layer is not None else None
+        if self._syncing or not link or not link.get("step"):
+            return
+        self._selected = link["step"]
+        self._rebuild()
+
+    # -- the detail of one step ------------------------------------------
+
+    def _show_detail(self, view: Any, graph: Any) -> None:
+        node = next((n for n in view.nodes if n.step == self._selected), None)
+        edited = node is not None and EDITED in node.flags
+        self._revert_button.setVisible(edited)
+        self._keep_button.setVisible(edited)
+        if node is None:
+            self._detail.setText(
+                "<i>Click a step, in the graph or the table, to see where it "
+                "came from.</i>"
+            )
+            return
+
+        path = lineage(graph, node.step)
+        esc = html.escape
+        lines = [
+            f"<b>{esc(node.step)}</b> &mdash; {esc(_short_op(node.op))}",
+            f"{esc(_states(node))} &mdash; {esc(_why(node))}",
+        ]
+        if path.upstream or path.roots:
+            chain = [f"<i>{esc(r)}</i>" for r in path.roots] + [
+                esc(s) for s in path.upstream
+            ]
+            chain.append(f"<b>{esc(node.step)}</b>")
+            lines.append("from: " + " &rarr; ".join(chain))
+        else:
+            lines.append("from: nothing, it reads no input")
+        if path.downstream:
+            lines.append("feeds: " + ", ".join(esc(s) for s in path.downstream))
+        run = node.current
+        if run is not None and run.params:
+            lines.append(
+                "parameters: "
+                + ", ".join(
+                    f"{esc(k)} = {esc(_setting(v))}" for k, v in run.params.items()
+                )
+            )
+        if node.runs and node.runs[0].status != "ok":
+            lines.append(f"last run failed: {esc(node.runs[0].error or 'unknown')}")
+        self._detail.setText("<br>".join(lines))
+
+    # -- bringing steps up to date ---------------------------------------
 
     def _produce_(self) -> None:
         """Bring the ticked steps up to date, and draw what moved.
@@ -266,11 +572,11 @@ class RecordPanel(Container):
         stays usable, and the layers are drawn when it is done.
         """
         if not self._targets or self._producing is not None:
-            self._status.value = self._targets_line()
+            self._status.setText(self._targets_line())
             return
         targets = sorted(self._targets)
-        self._produce.enabled = False
-        self._status.value = f"Producing {', '.join(targets)}..."
+        self._produce.setEnabled(False)
+        self._status.setText(f"Producing {', '.join(targets)}...")
         # NB: connected here rather than afterwards, for the reason the Ops
         # panel gives: the thread starts at once, and superqt re-raises into
         # the event loop unless an 'errored' handler was supplied this way.
@@ -291,11 +597,11 @@ class RecordPanel(Container):
                 self._host.show(step)
             except Exception:  # noqa: BLE001 -- a scalar output has no layer.
                 _log.info("Nothing to draw for %r", step)
-        self._status.value = f"Ran {', '.join(ran)}." if ran else "Already up to date."
+        self._status.setText(f"Ran {', '.join(ran)}." if ran else "Already up to date.")
 
     def _produce_failed(self, targets: list[str], exc: Exception) -> None:
         _log.error("Could not produce %s", targets, exc_info=exc)
-        self._status.value = f"{type(exc).__name__}: {exc}"
+        self._status.setText(f"{type(exc).__name__}: {exc}")
         show_error(str(exc))
 
     def _produce_finished(self) -> None:
@@ -304,26 +610,30 @@ class RecordPanel(Container):
 
     # -- the two ways an edit ends ---------------------------------------
 
-    def _revert(self, step: str) -> None:
+    def _revert(self, step: str | None) -> None:
         """Put a step's recorded output back over its layer."""
+        if step is None:
+            return
         try:
             self._host.revert(step)
         except Exception as exc:  # noqa: BLE001
-            self._status.value = f"{type(exc).__name__}: {exc}"
+            self._status.setText(f"{type(exc).__name__}: {exc}")
             return
-        self._status.value = f"Put {step!r} back to what its run produced."
+        self._status.setText(f"Put {step!r} back to what its run produced.")
         self._refresh()
 
-    def _keep(self, step: str) -> None:
+    def _keep(self, step: str | None) -> None:
         """Keep the hand-made pixels, and stop the step claiming to reproduce.
 
         Accepting adds a record like everything else: the run stays, and the
         mark after it says the pixels are the user's now.
         """
+        if step is None:
+            return
         try:
             self._recorder.accept_edit(step)
         except Exception as exc:  # noqa: BLE001
-            self._status.value = f"{type(exc).__name__}: {exc}"
+            self._status.setText(f"{type(exc).__name__}: {exc}")
             return
-        self._status.value = f"Kept the edit to {step!r}."
+        self._status.setText(f"Kept the edit to {step!r}.")
         self._refresh()

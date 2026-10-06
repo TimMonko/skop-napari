@@ -138,9 +138,33 @@ class Host:
         )
         #: Every layer the host linked, by the id it issued that layer.
         self._views: dict[str, _View] = {}
+        #: The view that stands behind each root name right now. A name is a
+        #: slot, not a layer: the layer in it can change (see ``bind_root``),
+        #: and only the one that holds it is the root's source.
+        self._owner: dict[str, str] = {}
         self._writing = 0
 
     # -- roots -----------------------------------------------------------
+
+    def sync(self) -> list[str]:
+        """Declare what is new, and notice roots that moved unobserved.
+
+        Declaring is for layers nobody has seen. A layer that was seen and then
+        changed while no one was listening -- recording was off, say -- is
+        found here by the identity of its data, as an event would have found
+        it. Only a layer holding a plain array is checked: a lazy one hands
+        out a new object on every read, and would look moved every time.
+        """
+        declared = self.declare_roots()
+        for layer in self.display.layers():
+            if (
+                self.linked(layer)
+                and isinstance(layer.data, np.ndarray)
+                and (found := self._view_of(layer)) is not None
+                and found.step is None
+            ):
+                self.data_changed(layer)
+        return declared
 
     def declare_roots(self) -> list[str]:
         """Declare every layer this session has not seen as a root.
@@ -171,7 +195,11 @@ class Host:
         return SKOP in layer.metadata
 
     def declare_root(self, layer: Layer) -> Handle:
-        """Store a layer's data as the root its own name names.
+        """Store a layer's data as a root, under the name the layer holds.
+
+        A layer is named by its own name the first time, and by that name from
+        then on even if the layer is renamed: a root's name is what its readers
+        know it by, and renaming a layer must not cut them off from it.
 
         The array handed on is the one remembered, never a fresh read of the
         layer: the store keys identity off the exact object, so a second
@@ -181,21 +209,131 @@ class Host:
         same name and keeps the id. That is the root moving, and whoever read
         the old version is stale from then on.
         """
-        array = np.asarray(layer.data)
         view_id = self._id_of(layer) or _new_id()
-        handle = self.recorder.root(layer.name, array)
+        return self._store_root(layer, view_id, self._root_name(layer, view_id))
+
+    def bind_root(self, name: str, layer: Layer) -> Handle:
+        """Make a layer the source of a root, in place of whichever was.
+
+        This is what choosing another layer for an input means. The root keeps
+        its name, so everything that read it is unchanged -- and stale, because
+        what stands behind the name is new. The layer that held the name before
+        keeps its link but not the name, and takes a fresh one of its own the
+        next time it changes.
+        """
+        view_id = self._id_of(layer) or _new_id()
+        previous = (layer.metadata.get(SKOP) or {}).get("root")
+        handle = self._store_root(layer, view_id, name)
+        if previous and previous != name and self._owner.get(previous) == view_id:
+            # The layer used to be a root of its own, and is not any more.
+            del self._owner[previous]
+            self.recorder.root_gone(previous)
+        return handle
+
+    def _store_root(self, layer: Layer, view_id: str, name: str) -> Handle:
+        array = np.asarray(layer.data)
+        handle = self.recorder.root(name, array)
+        self._owner[name] = view_id
         layer.metadata[SKOP] = {
             "id": view_id,
             "step": None,
             "handle": handle,
             "run": None,
+            "root": name,
         }
         self._views[view_id] = _View(view_id, None, handle, array)
         return handle
 
-    def link(
-        self, step: str, output: str, shown: np.ndarray
-    ) -> dict[str, Any] | None:
+    def _root_name(self, layer: Layer, view_id: str) -> str:
+        """The name a layer's root goes by: the one it holds, or a new one."""
+        held = (layer.metadata.get(SKOP) or {}).get("root")
+        if held is not None and self._owner.get(held, view_id) == view_id:
+            return held
+        name, count = layer.name, 1
+        while self._owner.get(name, view_id) != view_id:
+            count += 1
+            name = f"{layer.name} ({count})"
+        return name
+
+    def is_root(self, layer: Layer) -> bool:
+        """Whether a layer is an input, rather than a view of a step."""
+        found = self._view_of(layer)
+        return found is not None and found.step is None
+
+    def root_role(self, root: str) -> Role | None:
+        """What the ops that read a root take it to be, when they agree.
+
+        Read off the parameters that consume it, so a chooser can offer only
+        the layers that fit: an input a labels parameter reads is not offered
+        an image. None when nothing has read it, or its readers disagree.
+        """
+        roles: set[Role | None] = set()
+        graph = self.recorder.graph()
+        for run in graph.runs:
+            fn = self.registry.get(run.op)
+            if fn is None:
+                continue
+            by_name = {p.name: p for p in OpSpec.from_op(fn).params}
+            for param, handle in run.inputs.items():
+                found = graph.root_of(handle)
+                if found is not None and found.name == root and param in by_name:
+                    roles.add(by_name[param].role)
+        return roles.pop() if len(roles) == 1 else None
+
+    def layer_of(self, root: str) -> Layer | None:
+        """The layer standing behind a root, or None when there is none."""
+        view_id = self._owner.get(root)
+        if view_id is None:
+            return None
+        for layer in self.display.layers():
+            if self._id_of(layer) == view_id:
+                return layer
+        return None
+
+    def layer_removed(self, layer: Layer) -> str | None:
+        """Note that a layer left the viewer, and say which root it took.
+
+        The root is recorded as gone, so what read it can say so. The data is
+        kept: nothing about the past is lost, only where it came from. A layer
+        that was only a *view* of a step -- a result, rather than an input --
+        leaves the log alone, since the step's output is still in the store.
+        """
+        link = layer.metadata.get(SKOP)
+        if not link:
+            return None
+        view_id = link.get("id")
+        if any(self._id_of(other) == view_id for other in self.display.layers()):
+            return None  # a copy of it is still there
+        self._views.pop(view_id, None)
+        name = link.get("root")
+        if link.get("step") is None and name and self._owner.get(name) == view_id:
+            del self._owner[name]
+            self.recorder.root_gone(name)
+            return name
+        return None
+
+    def painted(self, layer: Layer) -> bool:
+        """Note a paint stroke, and say whether it needs acting on.
+
+        Painting changes an array in place and emits ``paint`` rather than
+        ``data``, so identity says nothing about it. A step's layer is marked
+        edited once, however many strokes follow. A root's layer is reported
+        for the caller to declare again when the strokes are done: storing a
+        whole array per mouse move is not something to do here.
+        """
+        if self._writing:
+            return False
+        found = self._view_of(layer)
+        if found is None:
+            return False
+        if found.step is None:
+            return True
+        if self.recorder.graph().is_edited(found.step):
+            return False
+        self.recorder.mark_edited(found.step)
+        return True
+
+    def link(self, step: str, output: str, shown: np.ndarray) -> dict[str, Any] | None:
         """The metadata that makes a layer a view of a step's current output.
 
         For a caller that draws the layer itself -- a panel that has already
@@ -391,13 +529,9 @@ class Host:
         view_id = self._id_of(layer)
         return None if view_id is None else self._views.get(view_id)
 
-    def _view_of_step(
-        self, step: str, output: str | None = None
-    ) -> _View | None:
+    def _view_of_step(self, step: str, output: str | None = None) -> _View | None:
         for view in self._views.values():
-            if view.step == step and (
-                output is None or view.output in (None, output)
-            ):
+            if view.step == step and (output is None or view.output in (None, output)):
                 return view
         return None
 

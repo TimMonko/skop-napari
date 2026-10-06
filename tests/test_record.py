@@ -19,6 +19,7 @@ from typing import Annotated
 
 import numpy as np
 import pytest
+from qtpy.QtCore import Qt
 
 import skop
 from skop import Choices, OpSpec, op
@@ -153,7 +154,7 @@ def test_a_layer_in_the_viewer_becomes_a_root(viewer, panel):
     assert panel._recorder.store.handle_of(image.data) == handle
     assert panel._recorder.store.get(handle).shape == (8, 8)
     assert np.array_equal(panel._host.array_for(image), image.data)
-    assert "image" in panel._roots.value
+    assert "image" in panel._input_layers
 
 
 def test_the_panel_runs_nothing_itself(panel):
@@ -180,7 +181,7 @@ def test_an_op_run_elsewhere_is_recorded_and_draws_its_layer(viewer, panel):
     assert np.allclose(drawn.data, image.data * 2)
     # The table is redrawn because the session said so, not because the panel
     # was asked: nothing here called its refresh.
-    assert "scale" in panel._table[0][0].value
+    assert panel._table.item(0, 1).text() == "scale"
 
 
 def test_the_same_op_twice_adds_a_run_rather_than_a_step(viewer, panel):
@@ -199,7 +200,7 @@ def test_the_same_op_twice_adds_a_run_rather_than_a_step(viewer, panel):
 
 def test_nothing_is_recorded_while_recording_is_off(viewer, panel):
     image = _add_image(viewer)
-    panel._recording.value = False
+    panel._recording.setChecked(False)
 
     assert panel._session.executor is panel._session.runner
     panel._session.executor.run(scale, {"image": image.data})
@@ -208,11 +209,11 @@ def test_nothing_is_recorded_while_recording_is_off(viewer, panel):
 
 
 def test_turning_recording_on_declares_what_was_opened_meanwhile(viewer, panel):
-    panel._recording.value = False
+    panel._recording.setChecked(False)
     late = _add_image(viewer, "late")
     assert SKOP not in late.metadata
 
-    panel._recording.value = True
+    panel._recording.setChecked(True)
 
     assert late.metadata[SKOP]["step"] is None
 
@@ -231,7 +232,7 @@ def test_a_workflow_is_one_step_and_its_ops_are_its_detail(viewer, panel):
         "scale_then_offset.offset",
     ]
     # One row, and one layer: what the workflow did on the way is not drawn.
-    assert len(panel._table) == 1
+    assert panel._table.rowCount() == 1
     assert [lyr.name for lyr in viewer.layers] == ["image", "scale_then_offset"]
     assert np.allclose(viewer.layers["scale_then_offset"].data, image.data * 2 + 10)
 
@@ -324,7 +325,7 @@ def test_produce_brings_the_closure_of_a_target_up_to_date(viewer, panel, qtbot)
     assert len(after.runs_of("scale")) == 2
     # And the layer shows the data that moved, not the data that was there.
     assert np.allclose(viewer.layers["scale"].data, image.data * 2)
-    assert "scale" in panel._status.value and "offset" in panel._status.value
+    assert "scale" in panel._status.text() and "offset" in panel._status.text()
 
 
 def test_the_ops_panel_records_through_the_session(viewer, qtbot):
@@ -355,10 +356,222 @@ def test_the_ops_panel_records_through_the_session(viewer, qtbot):
         drawn = record._host.display.layer_for("scale")
         assert drawn is not None and drawn is not image
         assert np.allclose(drawn.data, image.data * 2)
-        assert "scale" in record._table[0][0].value
+        assert record._table.item(0, 1).text() == "scale"
     finally:
         record._session.runner.close()
 
 
 def test_one_session_per_viewer(viewer):
     assert session_for(viewer) is session_for(viewer)
+
+
+# -- the panel, as a place to read a session -------------------------------
+
+
+def _two_steps(viewer, panel):
+    """scale, then offset reading what scale drew: a path with a middle."""
+    image = _add_image(viewer)
+    _run(panel, scale, image)
+    panel._host.run("offset", _spec(offset).name, {"image": viewer.layers["scale"]})
+    return image
+
+
+def _row(panel, step):
+    return next(
+        row
+        for row in range(panel._table.rowCount())
+        if panel._table.item(row, 1).text() == step
+    )
+
+
+def _tint(panel, step):
+    """The alpha a row is tinted with, or 0 when it is not tinted at all."""
+    brush = panel._table.item(_row(panel, step), 1).background()
+    return brush.color().alpha() if brush.style() != Qt.BrushStyle.NoBrush else 0
+
+
+def _badges(panel):
+    return {n.step: n.badge for n in panel._host.view().nodes}
+
+
+def test_the_table_says_what_a_step_read_made_and_ran_with(viewer, panel):
+    image = _add_image(viewer)
+    _run(panel, scale, image, factor=3.0)
+    _run(panel, scale, image, factor=4.0)
+
+    row = _row(panel, "scale")
+    cell = lambda column: panel._table.item(row, column).text()
+    assert cell(3) == "image ← image"
+    assert cell(4) == "result"
+    assert cell(5) == "factor=4.0"
+    assert cell(6) == "2"
+    assert "fresh" in cell(2)
+
+
+def test_choosing_another_layer_for_an_input_makes_its_readers_stale(
+    viewer, panel, qtbot
+):
+    first = _add_image(viewer)
+    _run(panel, scale, first)
+    other = viewer.add_image(np.full((8, 8), 5, dtype="float32"), name="other")
+    assert _badges(panel)["scale"] == "fresh"
+
+    # What the dropdown does when someone picks the other layer.
+    choices = panel._input_layers["image"]
+    assert first in choices and other in choices
+    panel._input_chosen("image", choices.index(other))
+
+    assert panel._host.layer_of("image") is other
+    assert panel._recorder.graph().is_stale("scale")
+    assert _badges(panel)["scale"] == "stale"
+
+    panel._tickle("scale", True)
+    panel._produce_()
+    qtbot.waitUntil(lambda: panel._producing is None, timeout=30_000)
+
+    # Produced from the new layer, which is what choosing it asked for.
+    assert not panel._recorder.graph().is_stale("scale")
+    assert np.allclose(viewer.layers["scale"].data, other.data * 2)
+
+
+def test_a_root_keeps_its_name_when_its_layer_is_renamed(viewer, panel):
+    image = _add_image(viewer)
+    _run(panel, scale, image)
+
+    image.name = "renamed"
+    image.data = image.data + 1  # then the pixels move
+
+    # Under the old name the readers know, not under the new one: otherwise
+    # the move would be a root nobody read, and nothing would go stale.
+    assert image.metadata[SKOP]["root"] == "image"
+    assert panel._recorder.graph().is_stale("scale")
+
+
+def test_a_layer_displaced_from_an_input_does_not_move_it_again(viewer, panel):
+    first = _add_image(viewer)
+    _run(panel, scale, first)
+    other = viewer.add_image(np.full((8, 8), 5, dtype="float32"), name="other")
+    panel._input_chosen("image", panel._input_layers["image"].index(other))
+    versions = len(panel._recorder.graph().roots_of("image"))
+
+    first.data = first.data + 1
+
+    # It is its own input now, not a second source for the name.
+    assert len(panel._recorder.graph().roots_of("image")) == versions
+    assert first.metadata[SKOP]["root"] == "image (2)"
+
+
+def test_removing_an_inputs_layer_marks_its_readers_missing_not_stale(viewer, panel):
+    image = _add_image(viewer)
+    _run(panel, scale, image)
+
+    viewer.layers.remove(image)
+
+    graph = panel._recorder.graph()
+    assert graph.gone == {"image"}
+    assert not graph.is_stale("scale")
+    assert _badges(panel)["scale"] == "missing"
+    assert "input gone" in panel._table.item(_row(panel, "scale"), 2).text()
+    # The dropdown says so, rather than quietly offering another layer.
+    assert panel._input_layers["image"][0] is None
+
+    # And the name can be filled again, which is what undoes it.
+    back = _add_image(viewer, "back")
+    panel._input_chosen("image", panel._input_layers["image"].index(back))
+    assert _badges(panel)["scale"] == "stale"
+
+
+def test_a_layer_changed_while_nothing_recorded_is_found_on_the_next_look(
+    viewer, panel
+):
+    image = _add_image(viewer)
+    _run(panel, scale, image)
+    panel._recording.setChecked(False)
+
+    image.data = image.data + 1
+    assert _badges(panel)["scale"] == "fresh"  # nobody was listening
+
+    panel._recording.setChecked(True)
+    assert _badges(panel)["scale"] == "stale"
+
+
+def test_painting_a_result_marks_it_edited(viewer, panel):
+    image = _add_image(viewer)
+    session = panel._session
+    steps: list[str] = []
+    result = session.executor.run(
+        scale, {"image": image.data}, on_recorded=steps.append
+    )
+    labels = session.draw(
+        steps[0], "result", result.astype("int32"), "labels", {"name": "painted"}
+    )
+    assert _badges(panel)["scale"] == "fresh"
+
+    labels.paint((2, 2), 7)  # in place, and reported as paint rather than data
+
+    assert _badges(panel)["scale"] == "edited"
+
+
+def test_painting_an_input_stores_a_new_version_once_the_strokes_stop(
+    viewer, panel, qtbot
+):
+    session = panel._session
+    mask = viewer.add_labels(np.ones((8, 8), dtype="int32"), name="mask")
+    steps: list[str] = []
+    session.executor.run(scale, {"image": mask.data}, on_recorded=steps.append)
+    before = len(panel._recorder.graph().roots_of("mask"))
+
+    for coord in ((1, 1), (1, 2), (1, 3)):
+        mask.paint(coord, 5)
+
+    qtbot.waitUntil(
+        lambda: len(panel._recorder.graph().roots_of("mask")) > before,
+        timeout=5_000,
+    )
+    # Three strokes, one version.
+    assert len(panel._recorder.graph().roots_of("mask")) == before + 1
+    assert panel._recorder.graph().is_stale("scale")
+
+
+def test_pointing_at_a_step_lights_the_path_through_it(viewer, panel):
+    _two_steps(viewer, panel)
+
+    panel.select("offset")
+
+    # What it was made from is lit, back to the input; nothing else is.
+    assert panel._canvas.lit == {("root:image", "scale"), ("scale", "offset")}
+    assert _tint(panel, "scale") == 60
+    assert _tint(panel, "offset") == 0
+    # And the layer is found in the viewer.
+    assert viewer.layers.selection.active is viewer.layers["offset"]
+    assert "image" in panel._detail.text() and "scale" in panel._detail.text()
+
+    panel.select("scale")
+
+    # From here the path runs both ways: in from the input, out to offset.
+    assert panel._canvas.lit == {("root:image", "scale"), ("scale", "offset")}
+    assert (
+        panel._table.item(_row(panel, "offset"), 1).background().color().alpha() == 55
+    )
+    assert "feeds: offset" in panel._detail.text()
+
+
+def test_clicking_a_node_in_the_graph_selects_it(viewer, panel):
+    _two_steps(viewer, panel)
+
+    panel._canvas.picked.emit("scale")
+    assert panel._selected == "scale"
+    assert panel._table.selectionModel().selectedRows()[0].row() == _row(panel, "scale")
+
+    # A root is not a step, so pointing at one points at nothing.
+    panel._canvas.picked.emit("root:image")
+    assert panel._selected is None
+
+
+def test_picking_a_layer_in_the_viewer_points_at_its_step(viewer, panel):
+    _two_steps(viewer, panel)
+
+    viewer.layers.selection.active = viewer.layers["scale"]
+
+    assert panel._selected == "scale"
+    assert ("scale", "offset") in panel._canvas.lit

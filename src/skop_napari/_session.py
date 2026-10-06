@@ -27,6 +27,7 @@ from typing import Any
 import napari.viewer
 from napari.layers import Layer
 from psygnal import Signal
+from qtpy.QtCore import QTimer
 
 from skop import OpSpec, Role, Runner, discover
 from skop_core import Graph, Recorder, RecordingRunner, SimpleStore
@@ -208,6 +209,13 @@ class Session:
         # So that an op ID a recipe holds can be turned back into its op.
         self.recorder.registry = self.host.registry
         self._recording = False
+        #: Root layers painted on, waiting for the strokes to stop. A stroke
+        #: reports on every mouse move, and a root is stored whole.
+        self._painted_roots: dict[int, Any] = {}
+        self._settle = QTimer()
+        self._settle.setSingleShot(True)
+        self._settle.setInterval(400)
+        self._settle.timeout.connect(self._redeclare_painted)
 
         viewer.layers.events.inserted.connect(self._inserted)
         viewer.layers.events.removed.connect(self._removed)
@@ -239,10 +247,25 @@ class Session:
         return self.listener if self._recording else self.runner
 
     def declare_roots(self) -> None:
-        """Take every layer the session has not seen as a root."""
-        declared = self.host.declare_roots()
+        """Take every layer the session has not seen as a root.
+
+        Also notices an input that moved while nothing was recording, so the
+        steps that read it say so.
+        """
+        declared = self.host.sync()
         if declared:
             _log.info("Declared roots: %s", ", ".join(declared))
+        self.changed.emit()
+
+    def bind_root(self, name: str, layer: Any) -> None:
+        """Make a layer the source of a root: choosing another input.
+
+        The steps that read the root are stale from here on, which is the
+        point -- they were made from something else.
+        """
+        if self.host.layer_of(name) is layer:
+            return
+        self.host.bind_root(name, layer)
         self.changed.emit()
 
     # -- drawing a recorded run ------------------------------------------
@@ -315,11 +338,47 @@ class Session:
             self.declare_roots()
 
     def _removed(self, event: Any) -> None:
+        if self._recording:
+            gone = self.host.layer_removed(event.value)
+            if gone:
+                _log.info("Input %r has no layer any more", gone)
         self.changed.emit()
 
     def _watch(self, layer: Any) -> None:
-        """Listen for a layer's data changing by hand."""
+        """Listen for a layer's data changing by hand, or being painted on."""
         layer.events.data.connect(self._data_changed)
+        # Only a Labels layer paints, and napari does not report a stroke as a
+        # change of data: the array is changed in place.
+        paint = getattr(layer.events, "paint", None)
+        if paint is not None:
+            paint.connect(self._painted)
+
+    def _painted(self, event: Any) -> None:
+        if not self._recording:
+            return
+        layer = event.source
+        try:
+            mattered = self.host.painted(layer)
+        except Exception:  # noqa: BLE001 -- an event handler must not raise.
+            _log.exception("Could not read the paint on %r", layer)
+            return
+        if not mattered:
+            return
+        if self.host.is_root(layer):
+            self._painted_roots[id(layer)] = layer
+            self._settle.start()
+        else:
+            self.changed.emit()
+
+    def _redeclare_painted(self) -> None:
+        """The strokes stopped: store each painted input as a new version."""
+        painted, self._painted_roots = self._painted_roots, {}
+        for layer in painted.values():
+            try:
+                self.host.declare_root(layer)
+            except Exception:  # noqa: BLE001 -- see _painted.
+                _log.exception("Could not store the paint on %r", layer)
+        self.changed.emit()
 
     def _data_changed(self, event: Any) -> None:
         """Note a hand edit, or a root moving."""
