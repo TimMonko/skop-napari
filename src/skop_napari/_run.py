@@ -128,7 +128,7 @@ def outputs_of(spec: OpSpec, result: Any) -> dict[str, Any]:
     tell that from a bare return, and would label the tuple itself as the
     output -- handing napari a tuple where an array belongs.
     """
-    names = spec.outputs
+    names = tuple(o.name for o in spec.outputs)
     if not names:
         return {}
     if getattr(result, "_fields", None) == tuple(names):

@@ -13,17 +13,17 @@ from skop_napari._widget import build_inputs, param_docs
 def test_roles_become_napari_types():
     from skop.ops.threshold import otsu
 
-    spec = skop.spec(otsu)
+    spec = skop.OpSpec.from_op(otsu)
     image = next(p for p in spec.params if p.name == "image")
     assert annotation_for(image) is nt.ImageData
-    assert [layer_type_for(o) for o in spec.output_specs] == ["labels"]
+    assert [layer_type_for(o) for o in spec.outputs] == ["labels"]
 
 
 def test_unannotated_array_is_guessed_to_be_an_image():
     # skop reports role None; guessing is this layer's job, not skop's.
     from skop.ops import toy
 
-    spec = skop.spec(toy.scale)
+    spec = skop.OpSpec.from_op(toy.scale)
     image = next(p for p in spec.params if p.name == "image")
     assert image.role is None
     assert annotation_for(image) is nt.ImageData
@@ -32,8 +32,8 @@ def test_unannotated_array_is_guessed_to_be_an_image():
 def test_scalar_outputs_are_not_layers():
     from skop.ops.segment import unseg
 
-    spec = skop.spec(unseg)
-    kinds = {o.name: layer_type_for(o) for o in spec.output_specs}
+    spec = skop.OpSpec.from_op(unseg)
+    kinds = {o.name: layer_type_for(o) for o in spec.outputs}
     assert kinds == {
         "nuclei": "labels",
         "cells": "labels",
@@ -45,7 +45,7 @@ def test_scalar_outputs_are_not_layers():
 def test_builds_a_widget_per_input(qtbot):
     from skop.ops.segment import stardist2d_fluo
 
-    spec = skop.spec(stardist2d_fluo)
+    spec = skop.OpSpec.from_op(stardist2d_fluo)
     inputs = build_inputs(spec, annotation_for)
 
     assert inputs.runnable
@@ -65,7 +65,7 @@ def test_builds_a_widget_per_input(qtbot):
 def test_output_buffers_are_never_asked_for(qtbot):
     from skop.ops import toy
 
-    spec = skop.spec(toy.scale_into)
+    spec = skop.OpSpec.from_op(toy.scale_into)
     inputs = build_inputs(spec, annotation_for)
     # 'result' is an Out param: the caller allocates it, so no widget.
     assert [w.name for w in inputs.widgets] == ["image", "factor"]
@@ -76,7 +76,7 @@ def test_unrenderable_optional_falls_back_to_its_default(qtbot):
     # They have defaults, so the op stays runnable without them.
     from skop.ops.segment import unseg
 
-    spec = skop.spec(unseg)
+    spec = skop.OpSpec.from_op(unseg)
     inputs = build_inputs(spec, annotation_for)
 
     assert inputs.runnable
@@ -94,7 +94,7 @@ def test_unrenderable_required_input_blocks_the_op(qtbot):
     def awkward(thing: Opaque) -> int:
         return 0
 
-    inputs = build_inputs(skop.spec(awkward), annotation_for)
+    inputs = build_inputs(skop.OpSpec.from_op(awkward), annotation_for)
     assert not inputs.runnable
     assert [name for name, _ in inputs.blocking] == ["thing"]
 
@@ -102,13 +102,13 @@ def test_unrenderable_required_input_blocks_the_op(qtbot):
 def test_docstring_becomes_tooltips(qtbot):
     from skop.ops.threshold import otsu
 
-    docs = param_docs(skop.spec(otsu).doc)
+    docs = param_docs(skop.OpSpec.from_op(otsu).doc)
     assert "trailing RGB(A) axis" in docs["image"]
     # Wrapped continuation lines are joined onto their parameter.
     assert docs["label_objects"].startswith("Whether to label connected components")
     assert "binary mask" in docs["label_objects"]
 
-    inputs = build_inputs(skop.spec(otsu), annotation_for)
+    inputs = build_inputs(skop.OpSpec.from_op(otsu), annotation_for)
     invert = next(w for w in inputs.widgets if w.name == "invert")
     assert "below the threshold" in invert.tooltip
 
@@ -121,7 +121,7 @@ def test_param_docs_tolerates_an_unconventional_docstring():
 def test_values_reflect_the_widgets(qtbot):
     from skop.ops.threshold import otsu
 
-    inputs = build_inputs(skop.spec(otsu), annotation_for)
+    inputs = build_inputs(skop.OpSpec.from_op(otsu), annotation_for)
     next(w for w in inputs.widgets if w.name == "invert").value = True
 
     values = inputs.values()
@@ -134,10 +134,10 @@ def test_outputs_are_labeled_by_name():
     from skop.ops import toy
     from skop_napari._run import outputs_of
 
-    single = skop.spec(toy.add)
+    single = skop.OpSpec.from_op(toy.add)
     assert outputs_of(single, 42) == {"result": 42}
 
-    multi = skop.spec(toy.scale)
+    multi = skop.OpSpec.from_op(toy.scale)
     scaled = np.zeros((2, 2))
     assert outputs_of(multi, (scaled, 7.0)) == {"scaled": scaled, "total": 7.0}
 
@@ -152,7 +152,7 @@ def test_a_single_field_namedtuple_output_is_unwrapped():
     from skop_napari._run import outputs_of
 
     boxes = np.array([[236.4, 144.1, 287.5, 201.0]], dtype=np.float32)
-    labeled = outputs_of(skop.spec(fastsam), Boxes(boxes))
+    labeled = outputs_of(skop.OpSpec.from_op(fastsam), Boxes(boxes))
 
     assert list(labeled) == ["boxes"]
     assert labeled["boxes"] is boxes
@@ -162,7 +162,7 @@ def test_resolve_finds_the_op_function():
     from skop.ops import toy
     from skop_napari._run import resolve
 
-    assert resolve(skop.spec(toy.add)) is toy.add
+    assert resolve(skop.OpSpec.from_op(toy.add)) is toy.add
 
 
 def test_shapes_inputs_are_converted_from_what_a_layer_holds(qtbot):
@@ -177,9 +177,9 @@ def test_shapes_inputs_are_converted_from_what_a_layer_holds(qtbot):
     from skop_napari._roles import value_for
 
     boxes_param = next(
-        p for p in skop.spec(mobilesam_masks).params if p.name == "boxes"
+        p for p in skop.OpSpec.from_op(mobilesam_masks).params if p.name == "boxes"
     )
-    assert boxes_param.role is Role.shapes
+    assert boxes_param.role is Role.boxes
 
     # Exactly what napari gives: a list of rectangles, four corners each.
     layer_data = [
@@ -198,7 +198,7 @@ def test_canonical_boxes_pass_through_unconverted(qtbot):
     from skop_napari._roles import value_for
 
     boxes_param = next(
-        p for p in skop.spec(mobilesam_masks).params if p.name == "boxes"
+        p for p in skop.OpSpec.from_op(mobilesam_masks).params if p.name == "boxes"
     )
     canonical = np.array([[20, 10, 40, 30]], dtype=np.float32)
     assert value_for(boxes_param, canonical) is canonical

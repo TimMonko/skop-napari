@@ -25,7 +25,6 @@ from magicgui.widgets import ComboBox, Container, Label
 from qtpy.QtWidgets import QSizePolicy
 
 from skop import OpSpec, ParamSpec
-from skop import spec as spec_of
 
 from ._widget import Inputs, build_inputs, param_docs
 
@@ -123,7 +122,7 @@ class Stage(Container):
 
     @property
     def spec(self) -> OpSpec:
-        return spec_of(self.op)
+        return OpSpec.from_op(self.op)
 
     @property
     def runnable(self) -> bool:

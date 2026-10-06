@@ -65,6 +65,8 @@ _INPUT_TYPES: dict[Role, Any] = {
     Role.image: nt.ImageData,
     Role.labels: nt.LabelsData,
     Role.points: nt.PointsData,
+    # Boxes are drawn on a Shapes layer, and read back off one.
+    Role.boxes: nt.ShapesData,
     Role.shapes: nt.ShapesData,
     Role.surface: nt.SurfaceData,
     Role.tracks: nt.TracksData,
@@ -82,6 +84,7 @@ _LAYER_TYPES: dict[Role, str] = {
     Role.labels: "labels",
     Role.masks: "labels",
     Role.points: "points",
+    Role.boxes: "shapes",
     Role.shapes: "shapes",
     Role.surface: "surface",
     Role.tracks: "tracks",
@@ -135,7 +138,7 @@ def value_for(param: ParamSpec, value: Any) -> Any:
     An array already in skop's layout passes through, so an op called with
     boxes from somewhere other than a layer is not converted twice.
     """
-    if param.role is Role.shapes and value is not None:
+    if param.role is Role.boxes and value is not None:
         if isinstance(value, np.ndarray) and value.ndim == 2 and value.shape[-1] == 4:
             return value
         return boxes.from_napari(value)
@@ -168,7 +171,7 @@ def layer_args_for(
     before projecting, which is what gives the 2-D strategies their meaning --
     see ``MASK_VIEWS``.
     """
-    if output.role is Role.shapes:
+    if output.role is Role.boxes:
         array = np.asarray(value)
         if array.ndim == 2 and array.shape[-1] == 4:
             return boxes.to_napari(array), {

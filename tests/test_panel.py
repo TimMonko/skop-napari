@@ -277,7 +277,7 @@ def test_a_stack_maps_its_inner_axes_and_offers_the_rest(panel):
     assert [c.value for c in row._slots] == [1, 2]
     assert [c.label for c in row._extra] == ["-3"]
     # The default keeps everything, so nothing needs confirming.
-    assert row.plan.lossless
+    assert row.plan.uses_all_data
     assert row.plan.iterate == (0,)
     # An unnamed axis makes no claim, so feeding it to y is nothing to warn of.
     assert row.warnings == ()
@@ -337,7 +337,7 @@ def test_a_leftover_axis_can_be_switched_to_the_current_position(panel):
 
     assert row.plan.select == ((0, 3),)
     assert "axis 0=3" in row.plan.summary
-    assert not row.plan.lossless
+    assert not row.plan.uses_all_data
 
 
 def test_moving_the_slider_moves_the_selected_position(panel):
@@ -517,7 +517,7 @@ def test_boxes_are_reshaped_but_never_axis_labelled(panel):
     from skop_napari._roles import layer_args_for
 
     boxes = np.array([[1.0, 2.0, 5.0, 6.0], [3.0, 4.0, 9.0, 8.0]], dtype=np.float32)
-    output = OutputSpec(name="boxes", type=np.ndarray, role=Role.shapes)
+    output = OutputSpec(name="boxes", type=np.ndarray, role=Role.boxes)
 
     data, extra = layer_args_for(output, boxes)
     assert data.shape == (2, 2, 2)

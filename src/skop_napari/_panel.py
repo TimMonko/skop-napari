@@ -308,7 +308,7 @@ class OpsPanel(Container):
         self._results.visible = False
 
     def _makes_masks(self) -> bool:
-        return any(output.role is Role.masks for output in self.spec.output_specs)
+        return any(output.role is Role.masks for output in self.spec.outputs)
 
     def _show_z_spacing(self) -> None:
         """Offer the stack spacing only when a stack is what will be made.
@@ -468,7 +468,7 @@ class OpsPanel(Container):
         scalars: list[tuple[str, Any]] = []
         dropped: list[str] = []
 
-        for output in spec.output_specs:
+        for output in spec.outputs:
             value = values.get(output.name)
             if value is None:
                 _log.info("Op %s returned no %s", spec.name, output.name)
