@@ -29,7 +29,7 @@ import numpy as np
 
 from skop import OpSpec, Role
 from skop.types import Array
-from skop_core import Handle, Recorder
+from skop_core import Handle, Prepared, Recorder, Replayed
 from skop_visual import GraphView
 from skop_visual import view as build_view
 
@@ -557,6 +557,56 @@ class Host:
             if found.name == output:
                 return found.role
         return None
+
+    # -- replaying a recipe ----------------------------------------------
+
+    def bind(self, prepared: Prepared, bindings: Mapping[str, Any]) -> dict[str, Any]:
+        """Turn what a user chose for each input into what a replay reads.
+
+        A layer becomes the data the store knows it by -- the same rule as
+        running an op on it (:meth:`array_for`), so an edited layer is refused
+        in words, and a layer nobody declared yet is declared first. That is
+        what lets a replay read ``root:blobs`` or a step's output rather than
+        a copy under the recipe's name. A path stays a path. An input left
+        unbound is left out, for :meth:`Prepared.check` to name.
+        """
+        roots: dict[str, Any] = {}
+        for need in prepared.roots:
+            if need.name not in bindings:
+                continue
+            chosen = bindings[need.name]
+            if not need.is_path and _is_layer(chosen):
+                if not self.linked(chosen):
+                    self.declare_root(chosen)
+                chosen = self.array_for(chosen)
+            roots[need.name] = chosen
+        return roots
+
+    def replay(
+        self,
+        prepared: Prepared,
+        bindings: Mapping[str, Any],
+        *,
+        every_step: bool = False,
+        **options: Any,
+    ) -> Replayed:
+        """Replay a recipe onto layers, record it, and draw what it made.
+
+        For a host with no event loop to keep alive. The napari panel binds
+        here, runs on a worker, and draws as each step lands.
+        """
+        done = prepared.run(self.bind(prepared, bindings), self.recorder, **options)
+        for step in self.to_draw(prepared, done, every_step):
+            self.show(step)
+        return done
+
+    @staticmethod
+    def to_draw(
+        prepared: Prepared, done: Replayed, every_step: bool = False
+    ) -> list[str]:
+        """The session steps a replay draws: its targets, or every step."""
+        wanted = prepared.steps if every_step else prepared.targets
+        return [done.steps[step] for step in wanted if step in done.steps]
 
     # -- what is drawn ---------------------------------------------------
 

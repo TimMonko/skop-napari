@@ -330,3 +330,88 @@ def test_a_lazy_root_is_held_as_itself_and_never_read(tmp_path):
     assert host.recorder.store.get(root.handle) is lazy
     assert host.array_for(host.display.by_name("image")) is lazy
     assert lazy.reads == 0
+
+
+# -- replaying a recipe onto layers ------------------------------------------
+
+
+def _recorded_recipe(host):
+    from skop_core import export
+
+    host.declare_roots()
+    host.run("blurred", BLUR, {"image": host.display.by_name("image")})
+    host.run("labels", THRESHOLD, {"image": host.display.by_name("blurred")})
+    graph = host.recorder.graph()
+    return export(graph, ["labels"], host.recorder.store)
+
+
+def test_a_recipe_replays_onto_another_layer(tmp_path):
+    from skop_core import prepare
+
+    other = FakeLayer("other", an_image() - 8.0)
+    host = make_host(tmp_path, FakeLayer("image", an_image()), other)
+    recipe = _recorded_recipe(host)
+    prepared = prepare(recipe, REGISTRY)
+    done = host.replay(prepared, {"image": other})
+
+    assert done.steps == {"blurred": "blurred_2", "labels": "labels_2"}
+    graph = host.recorder.graph()
+    assert graph.sources_of(graph.current("blurred_2")) == {"image": "root:other"}
+    # Only the target is drawn, as the layer standing for its session step.
+    assert host.display.names()[-1] == "labels_2"
+    assert "blurred_2" not in host.display.names()
+
+
+def test_every_step_can_be_drawn(tmp_path):
+    from skop_core import prepare
+
+    other = FakeLayer("other", an_image())
+    host = make_host(tmp_path, FakeLayer("image", an_image()), other)
+    prepared = prepare(_recorded_recipe(host), REGISTRY)
+    host.replay(prepared, {"image": other}, every_step=True)
+    assert {"blurred_2", "labels_2"} <= set(host.display.names())
+
+
+def test_replaying_onto_the_same_layer_adds_runs_not_steps(tmp_path):
+    from skop_core import prepare
+
+    host = make_host(tmp_path, FakeLayer("image", an_image()))
+    prepared = prepare(_recorded_recipe(host), REGISTRY)
+    done = host.replay(prepared, {"image": host.display.by_name("image")})
+    assert done.steps == {"blurred": "blurred", "labels": "labels"}
+    assert len(host.recorder.graph().runs_of("labels")) == 2
+
+
+def test_a_layer_never_declared_is_declared_when_bound(tmp_path):
+    from skop_core import prepare
+
+    host = make_host(tmp_path, FakeLayer("image", an_image()))
+    prepared = prepare(_recorded_recipe(host), REGISTRY)
+    late = FakeLayer("late", an_image())
+    host.display._layers.append(late)
+    host.replay(prepared, {"image": late})
+    assert host.recorder.graph().current_root("late") is not None
+
+
+def test_an_edited_layer_is_refused_as_an_input(tmp_path):
+    from skop_core import prepare
+
+    host = make_host(tmp_path, FakeLayer("image", an_image()))
+    prepared = prepare(_recorded_recipe(host), REGISTRY)
+    blurred = host.display.by_name("blurred")
+    blurred.data = blurred.data + 1.0
+    host.data_changed(blurred)
+    with pytest.raises(UnknownLayer, match="Accept the edit"):
+        host.replay(prepared, {"image": blurred})
+
+
+def test_a_replay_can_chain_onto_a_steps_layer(tmp_path):
+    from skop_core import prepare
+
+    host = make_host(tmp_path, FakeLayer("image", an_image()))
+    prepared = prepare(_recorded_recipe(host), REGISTRY)
+    done = host.replay(prepared, {"image": host.display.by_name("blurred")})
+    graph = host.recorder.graph()
+    assert graph.sources_of(graph.current(done.steps["blurred"])) == {
+        "image": "blurred"
+    }
