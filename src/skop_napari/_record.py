@@ -49,12 +49,13 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from skop import OpSpec, Role
+from skop import OpSpec
 from skop_core import export, save
 from skop_visual import EDITED, KEPT, SIGNALS, Node, layout, lineage
 
 from ._graph import GraphCanvas
 from ._host import SKOP
+from ._roles import input_layer_types
 from ._session import Session, session_for
 
 _log = logging.getLogger("skop_napari")
@@ -70,11 +71,6 @@ _TICK, _STEP, _STATE, _IN, _OUT, _PARAMS, _RUNS, _OP = range(len(_COLUMNS))
 #: graph lights its edges in.
 _UPSTREAM = QColor(26, 115, 232, 60)
 _DOWNSTREAM = QColor(132, 48, 206, 55)
-
-#: The layers an input may be, by what the ops that read it take it to be.
-#: Anything not listed is not an array an op can read as an input at all.
-_ARRAY_LAYERS = ("image", "labels")
-_LAYERS_FOR_ROLE = {Role.image: ("image",), Role.labels: ("labels",)}
 
 
 def _short_op(op: str) -> str:
@@ -370,7 +366,7 @@ class RecordPanel(QWidget):
         layers = self._host.display.layers()
         offered: dict[str, list[Any]] = {}
         for name in names:
-            kinds = _LAYERS_FOR_ROLE.get(self._host.root_role(name), _ARRAY_LAYERS)
+            kinds = input_layer_types(self._host.root_role(name))
             offered[name] = [
                 layer for layer in layers if type(layer).__name__.lower() in kinds
             ]

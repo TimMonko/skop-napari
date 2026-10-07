@@ -126,6 +126,21 @@ def layer_type_for_role(role: Role | None) -> str | None:
     return None if role is None else _LAYER_TYPES.get(role)
 
 
+#: The layer types that can stand behind an input an op reads as an array.
+_INPUT_LAYERS = ("image", "labels")
+_INPUT_LAYERS_FOR_ROLE = {Role.image: ("image",), Role.labels: ("labels",)}
+
+
+def input_layer_types(role: Role | None) -> tuple[str, ...]:
+    """The layer types that may stand behind an input of this role.
+
+    An input a labels parameter reads is offered labels layers, not images.
+    With no role -- the readers disagree, or say nothing -- any layer an op
+    can read as an array will do.
+    """
+    return _INPUT_LAYERS_FOR_ROLE.get(role, _INPUT_LAYERS) if role else _INPUT_LAYERS
+
+
 def value_for(param: ParamSpec, value: Any) -> Any:
     """What an op wants, given what the widget for *param* is holding.
 
