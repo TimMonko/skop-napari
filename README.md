@@ -2,17 +2,23 @@
 
 Run [scikit-ops](https://github.com/apposed/scikit-ops) ops from napari.
 
-Adds one dock widget, **Ops**, which lists every op skop can discover, builds
-a form for the chosen one, and runs it in its own Appose environment — off
-the GUI thread, with progress and cancellation, and with its outputs added to
-the viewer as the layer types their roles call for.
+Adds three dock widgets under *Plugins → scikit-ops*:
+
+- **Ops** lists every op skop can discover, builds a form for the chosen one,
+  and runs it in its own Appose environment — off the GUI thread, with
+  progress and cancellation, and with its outputs added to the viewer as the
+  layer types their roles call for.
+- **Workflows** is the same panel showing the ops that call other ops.
+- **Record** writes down what the other two run, through
+  skop-workflows: the inputs,
+  a graph of what was made from what, which steps are stale, edited or kept,
+  *Produce* to bring ticked steps up to date, and *Export recipe…* to write
+  a recipe a script can replay. It runs nothing itself.
 
 ```sh
 uv sync --all-groups
 uv run napari
 ```
-
-Then *Plugins → scikit-ops → Ops*.
 
 ## What it does with an op
 
@@ -43,12 +49,17 @@ two rows of counts.
 ## Layout
 
 ```
-src/skop_napari/_roles.py   Role -> napari type; the only napari-specific part
-src/skop_napari/_axes.py    working out what a layer's axes are (no Qt)
-src/skop_napari/_plans.py   the axes field, slot mapping and axis dispositions
-src/skop_napari/_widget.py  OpSpec -> magicgui widgets (imports no napari)
-src/skop_napari/_run.py     running an op off the GUI thread
-src/skop_napari/_panel.py   the Ops widget itself
+src/skop_napari/_roles.py    Role -> napari type, and laying boxes/masks out
+src/skop_napari/_axes.py     working out what a layer's axes are (no Qt)
+src/skop_napari/_plans.py    the axes field, slot mapping and axis dispositions
+src/skop_napari/_widget.py   OpSpec -> magicgui widgets (imports no napari)
+src/skop_napari/_choices.py  a workflow's stages: a combo per chosen op
+src/skop_napari/_run.py      running an op off the GUI thread
+src/skop_napari/_panel.py    the Ops and Workflows widgets
+src/skop_napari/_host.py     recording bookkeeping: layers <-> runs (no napari)
+src/skop_napari/_session.py  one recorder, store and runner per viewer
+src/skop_napari/_graph.py    the Record panel's graph canvas
+src/skop_napari/_record.py   the Record widget
 ```
 
 `_widget.py` deliberately imports nothing from napari: the one napari-shaped
