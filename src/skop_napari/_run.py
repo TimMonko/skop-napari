@@ -114,27 +114,3 @@ class OpRun:
         self._canceled = True
         if self._task is not None:
             self._task.cancel()
-
-
-def outputs_of(spec: OpSpec, result: Any) -> dict[str, Any]:
-    """Label an op's return value with its output names.
-
-    ``Runner.run`` hands back exactly what the op returned -- a bare value
-    when the op declared a plain return type, a NamedTuple when it declared
-    one -- which is pleasant to call and useless to iterate generically. The
-    spec says what the pieces are called.
-
-    The NamedTuple case is tested first, and on its fields rather than on how
-    many there are. An op may declare a NamedTuple with a single field, to
-    give its one output a name better than "result"; counting outputs cannot
-    tell that from a bare return, and would label the tuple itself as the
-    output -- handing napari a tuple where an array belongs.
-    """
-    names = tuple(o.name for o in spec.outputs)
-    if not names:
-        return {}
-    if getattr(result, "_fields", None) == tuple(names):
-        return dict(zip(names, result, strict=True))
-    if len(names) == 1:
-        return {names[0]: result}
-    return dict(zip(names, result, strict=False))

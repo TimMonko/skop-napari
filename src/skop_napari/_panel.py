@@ -36,6 +36,7 @@ from psygnal import Signal
 from superqt.utils import ensure_main_thread
 
 from skop import OpSpec, Role, Runner, discover
+from skop_core import outputs_of
 
 from ._axes import METADATA_KEY
 from ._choices import is_workflow_plumbing, stages_for
@@ -50,7 +51,7 @@ from ._roles import (
     layer_type_for,
     value_for,
 )
-from ._run import OpRun, outputs_of, resolve
+from ._run import OpRun, resolve
 from ._session import Session, session_for
 from ._widget import Inputs, build_inputs
 

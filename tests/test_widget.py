@@ -132,7 +132,7 @@ def test_values_reflect_the_widgets(qtbot):
 
 def test_outputs_are_labeled_by_name():
     from skop.ops import toy
-    from skop_napari._run import outputs_of
+    from skop_core import outputs_of
 
     single = skop.OpSpec.from_op(toy.add)
     assert outputs_of(single, 42) == {"result": 42}
@@ -149,7 +149,7 @@ def test_a_single_field_namedtuple_output_is_unwrapped():
     # labeling the tuple itself hands napari a tuple where an array belongs.
     from skop.ops.detect import fastsam
     from skop.ops.detect._result import Boxes
-    from skop_napari._run import outputs_of
+    from skop_core import outputs_of
 
     boxes = np.array([[236.4, 144.1, 287.5, 201.0]], dtype=np.float32)
     labeled = outputs_of(skop.OpSpec.from_op(fastsam), Boxes(boxes))
