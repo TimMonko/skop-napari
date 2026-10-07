@@ -37,6 +37,7 @@ from qtpy.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
@@ -49,7 +50,8 @@ from qtpy.QtWidgets import (
 )
 
 from skop import OpSpec, Role
-from skop_visual import EDITED, SIGNALS, Node, layout, lineage
+from skop_core import export, save
+from skop_visual import EDITED, KEPT, SIGNALS, Node, layout, lineage
 
 from ._graph import GraphCanvas
 from ._host import SKOP
@@ -148,6 +150,14 @@ def _why(node: Node) -> str:
         "edited": "The result was changed by hand.",
         "affected": "An edited step feeds this one.",
         "failed": "The newest run failed.",
+        "cancelled": (
+            "The newest run was cancelled. What it handed back is kept to "
+            "look at; the step still stands on its last finished run."
+        ),
+        "kept": (
+            "A hand edit was kept: this is the user's pixels now, and a "
+            "recipe asks for them as an input."
+        ),
         "missing": (
             "The layer behind "
             + ", ".join(repr(name) for name in node.missing)
@@ -245,6 +255,11 @@ class RecordPanel(QWidget):
         self._keep_button.setVisible(False)
 
         self._produce = QPushButton("Produce")
+        self._export = QPushButton("Export recipe...")
+        self._export.setToolTip(
+            "Write the steps the ticked targets need -- or, with none ticked, "
+            "everything nothing else reads -- as a recipe a script can replay."
+        )
         self._produce.setToolTip("Bring the ticked steps up to date.")
         self._status = QLabel("")
         self._status.setWordWrap(True)
@@ -255,6 +270,7 @@ class RecordPanel(QWidget):
         edit_row.addStretch(1)
         run_row = QHBoxLayout()
         run_row.addWidget(self._produce)
+        run_row.addWidget(self._export)
         run_row.addStretch(1)
 
         column = QVBoxLayout(self)
@@ -275,6 +291,7 @@ class RecordPanel(QWidget):
         self._recording.toggled.connect(self._record_toggled)
         self._refresh_inputs.clicked.connect(self._declare_roots)
         self._produce.clicked.connect(self._produce_)
+        self._export.clicked.connect(self._export_)
         self._revert_button.clicked.connect(lambda: self._revert(self._selected))
         self._keep_button.clicked.connect(lambda: self._keep(self._selected))
         self._table.itemChanged.connect(self._ticked)
@@ -543,7 +560,8 @@ class RecordPanel(QWidget):
     def _show_detail(self, view: Any, graph: Any) -> None:
         node = next((n for n in view.nodes if n.step == self._selected), None)
         edited = node is not None and EDITED in node.flags
-        self._revert_button.setVisible(edited)
+        kept = node is not None and KEPT in node.flags
+        self._revert_button.setVisible(edited or kept)
         self._keep_button.setVisible(edited)
         if node is None:
             self._detail.setText(
@@ -640,6 +658,42 @@ class RecordPanel(QWidget):
         self._producing = None
         self._refresh()
 
+    # -- exporting -------------------------------------------------------
+
+    def export_recipe(self, path: str | Path) -> dict[str, Any]:
+        """Write the recipe for the ticked targets, or the leaves, to a file.
+
+        The recipe is the targets' closure (decision 29): an abandoned branch
+        never travels. What will not reproduce -- an edit, or what reads one
+        -- is said in the status line, as the recipe itself records it.
+        """
+        targets = sorted(self._targets) or None
+        recipe = export(self._recorder.graph(), targets, self._recorder.store)
+        save(recipe, path)
+        caution = recipe["caution"]
+        said = [f"Wrote {len(recipe['steps'])} steps to {Path(path).name}."]
+        if caution["edited"] or caution["affected"]:
+            said.append(
+                "Will not reproduce: "
+                + ", ".join(caution["edited"] + caution["affected"])
+                + "."
+            )
+        if caution["kept"]:
+            said.append("Asks for kept pixels: " + ", ".join(caution["kept"]) + ".")
+        self._status.setText(" ".join(said))
+        return recipe
+
+    def _export_(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export recipe", "recipe.json", "Recipe (*.json)"
+        )
+        if not path:
+            return
+        try:
+            self.export_recipe(path)
+        except Exception as exc:  # noqa: BLE001 -- said, not raised
+            self._status.setText(f"{type(exc).__name__}: {exc}")
+
     # -- the two ways an edit ends ---------------------------------------
 
     def _revert(self, step: str | None) -> None:
@@ -657,13 +711,14 @@ class RecordPanel(QWidget):
     def _keep(self, step: str | None) -> None:
         """Keep the hand-made pixels, and stop the step claiming to reproduce.
 
-        Accepting adds a record like everything else: the run stays, and the
-        mark after it says the pixels are the user's now.
+        Keeping adds a record like everything else: the run stays, the pixels
+        are stored, and the mark after it says they are the user's now. What
+        read the step goes stale, and Produce brings it up to date on them.
         """
         if step is None:
             return
         try:
-            self._recorder.accept_edit(step)
+            self._host.keep(step)
         except Exception as exc:  # noqa: BLE001
             self._status.setText(f"{type(exc).__name__}: {exc}")
             return

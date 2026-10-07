@@ -261,18 +261,33 @@ def test_an_op_that_names_an_environment_reaches_the_runner(viewer):
     session.recorder.inner = noting
     image = _add_image(viewer)
 
+    started = []
     result = session.executor.run(
         sharpen,
         {"image": image.data},
         on_progress=print,
-        on_start=print,
+        on_start=started.append,
     )
 
     (fn, args, options) = noting.calls[0]
     assert fn is sharpen
     assert args["image"] is image.data
-    # What the caller asked of the runner reaches it: progress and Cancel.
-    assert options == {"on_progress": print, "on_start": print}
+    # What the caller asked of the runner reaches it: progress, and a cancel
+    # handle -- watched on the way, so a cancelled run is recorded as one.
+    assert set(options) == {"on_progress", "on_start"}
+    assert options["on_progress"] is print
+
+    class Task:
+        cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    task = Task()
+    options["on_start"](task)
+    (handed,) = started
+    handed.cancel()
+    assert task.cancelled
     assert np.array_equal(result, image.data + 1)
     assert session.recorder.graph().current("sharpen") is not None
     session.runner.close()
@@ -674,3 +689,71 @@ def test_dragging_the_graph_pans_it_rather_than_selecting(viewer, panel, qtbot):
     )
 
     assert panel._selected == "scale"
+
+
+def test_keeping_an_edit_stores_it_and_stales_what_read_it(viewer, panel):
+    image = _add_image(viewer)
+    step = _run(panel, scale, image)
+    after = _run(panel, offset, viewer.layers[step])
+    result = viewer.layers[step]
+    result.data = np.zeros_like(result.data)  # a hand edit, by assignment
+    assert panel._recorder.graph().is_edited(step)
+
+    panel.select(step)
+    assert panel._keep_button.isVisibleTo(panel)
+    panel._keep(step)
+    graph = panel._recorder.graph()
+    assert graph.is_accepted(step) and graph.is_stale(after)
+    kept = panel._recorder.store.get(graph.accepted(step))
+    assert not kept.any()
+    # The kept layer can be run on, and what runs on it reads the kept pixels.
+    again = _run(panel, offset, viewer.layers[step])
+    assert again == after
+    assert (viewer.layers[after].data == 10.0).all()
+    assert panel._revert_button.isVisibleTo(panel)
+
+
+def test_a_redrawn_box_output_is_laid_out_as_rectangles(viewer, panel):
+    from skop import Role
+
+    display = panel._session.display
+    boxes = np.array([[1.0, 2.0, 5.0, 6.0], [0.0, 0.0, 3.0, 3.0]])
+    layer = display.show(
+        "found",
+        boxes,
+        step="found",
+        role=Role.boxes,
+        metadata={SKOP: {"id": "x", "step": "found", "output": "boxes"}},
+    )
+    assert type(layer).__name__ == "Shapes"
+    assert len(layer.data) == 2
+    assert set(layer.shape_type) == {"rectangle"}
+
+
+def test_a_scalar_output_is_not_drawn(viewer, panel):
+    display = panel._session.display
+    count = len(viewer.layers)
+    assert display.show("n", np.int64(3), step="n") is None
+    assert len(viewer.layers) == count
+
+
+def test_exporting_writes_the_closure_of_the_ticked_targets(viewer, panel, tmp_path):
+    from skop_core import load
+
+    image = _add_image(viewer)
+    first = _run(panel, scale, image)
+    second = _run(panel, offset, viewer.layers[first])
+    _run(panel, offset, image)  # another branch, off the path
+    panel._tickle(second, True)
+    recipe = panel.export_recipe(tmp_path / "recipe.json")
+    assert set(recipe["steps"]) == {first, second}
+    assert load(tmp_path / "recipe.json") == recipe
+    assert "Wrote 2 steps" in panel._status.text()
+
+
+def test_exporting_with_nothing_ticked_takes_the_leaves(viewer, panel, tmp_path):
+    image = _add_image(viewer)
+    first = _run(panel, scale, image)
+    second = _run(panel, offset, viewer.layers[first])
+    recipe = panel.export_recipe(tmp_path / "recipe.json")
+    assert recipe["targets"] == [second]
