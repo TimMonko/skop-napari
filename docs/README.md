@@ -30,3 +30,4 @@ to change the panel and wants to know which of its oddities are load-bearing.
 | | |
 | --- | --- |
 | [dynamic-registration.md](spec/dynamic-registration.md) | Splitting the panel up when npe2 allows it |
+| [replay-onto-layers.md](spec/replay-onto-layers.md) | Replaying a recipe onto layers: binding inputs, running, drawing |
