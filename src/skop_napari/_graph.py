@@ -104,11 +104,21 @@ class GraphCanvas(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setMinimumHeight(200)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # Drag to pan; Ctrl+wheel zooms about the cursor. A plain wheel is left
+        # to the panel, which is what scrolls when the dock is taller than the
+        # screen -- a graph that swallowed it would trap the pointer.
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         #: Which nodes were drawn, by key, for a test or a caller to ask.
         self.nodes: dict[str, _Node] = {}
         #: The edges drawn on the path, as ``(source, target)`` keys.
         self.lit: set[tuple[str, str]] = set()
         self._layout: Layout | None = None
+        #: Whether the user has zoomed or panned. Until then every redraw and
+        #: resize fits the whole graph; after, their view is kept, because a
+        #: refresh that threw it away would undo what they just did.
+        self._placed_by_hand = False
+        self._pressed_at: Any = None
 
     # -- drawing ---------------------------------------------------------
 
@@ -181,7 +191,7 @@ class GraphCanvas(QGraphicsView):
             self._scene.addItem(node)
             self.nodes[placed.key] = node
 
-        self._scene.setSceneRect(self._scene.itemsBoundingRect().adjusted(-8, -8, 8, 8))
+        self._grow_scene()
         self._fit()
 
     def _edge(
@@ -217,8 +227,14 @@ class GraphCanvas(QGraphicsView):
     # -- sizing ----------------------------------------------------------
 
     def _fit(self) -> None:
-        """Fit the whole graph in view, but never blow a small one up."""
-        rect = self._scene.sceneRect()
+        """Fit the whole graph in view, but never blow a small one up.
+
+        Left alone once the user has zoomed or panned; a double-click on the
+        background asks for the fit back.
+        """
+        if self._placed_by_hand:
+            return
+        rect = self._scene.itemsBoundingRect().adjusted(-8, -8, 8, 8)
         if rect.isEmpty():
             return
         self.resetTransform()
@@ -227,18 +243,79 @@ class GraphCanvas(QGraphicsView):
             self.resetTransform()
             self.centerOn(rect.center())
 
+    def fit(self) -> None:
+        """Forget the user's zoom and pan, and show the whole graph again."""
+        self._placed_by_hand = False
+        self._fit()
+
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
         self._fit()
 
+    # -- zooming and panning ---------------------------------------------
+
+    #: How far the user may zoom, as a scale of the scene.
+    _ZOOM_RANGE = (0.15, 4.0)
+
+    def zoom(self, factor: float) -> None:
+        """Scale the view by *factor*, within the allowed range."""
+        low, high = self._ZOOM_RANGE
+        current = self.transform().m11()
+        factor = max(low / current, min(high / current, factor))
+        self.scale(factor, factor)
+        self._placed_by_hand = True
+
+    def wheelEvent(self, event: Any) -> None:
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            # One notch of a mouse wheel is 120 units: about 20% a notch, and
+            # smooth on a trackpad, which sends many small ones.
+            self.zoom(1.0015 ** event.angleDelta().y())
+            event.accept()
+            return
+        # Not ours: pass it up, so the panel around the graph scrolls.
+        event.ignore()
+
+    def _grow_scene(self) -> None:
+        """Give the scene room around the graph, so a zoomed view can pan.
+
+        Without slack the scene is exactly the graph, and a view showing all
+        of it has nowhere to move to.
+        """
+        rect = self._scene.itemsBoundingRect()
+        margin = max(rect.width(), rect.height())
+        self._scene.setSceneRect(rect.adjusted(-margin, -margin, margin, margin))
+
     # -- picking ---------------------------------------------------------
 
     def mousePressEvent(self, event: Any) -> None:
-        item = self.itemAt(event.pos())
+        self._pressed_at = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: Any) -> None:
+        super().mouseReleaseEvent(event)
+        pressed, self._pressed_at = self._pressed_at, None
+        if pressed is None:
+            return
+        moved = (event.pos() - pressed).manhattanLength()
+        if moved > 4:
+            # A drag was a pan, not a click: it changes the view, not what
+            # is selected.
+            self._placed_by_hand = True
+            return
+        self.picked.emit(self._key_at(event.pos()))
+
+    def mouseDoubleClickEvent(self, event: Any) -> None:
+        if not self._key_at(event.pos()):
+            self.fit()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def _key_at(self, pos: Any) -> str:
+        """The node under a point of the view, or '' for the background."""
+        item = self.itemAt(pos)
         while item is not None and not isinstance(item, _Node):
             item = item.parentItem()
-        self.picked.emit(item.key if isinstance(item, _Node) else "")
-        super().mousePressEvent(event)
+        return item.key if isinstance(item, _Node) else ""
 
     def sizeHint(self) -> Any:
         return QSize(360, 260)

@@ -575,3 +575,102 @@ def test_picking_a_layer_in_the_viewer_points_at_its_step(viewer, panel):
 
     assert panel._selected == "scale"
     assert ("scale", "offset") in panel._canvas.lit
+
+
+def test_produce_draws_a_deleted_result_again_without_running_it(viewer, panel, qtbot):
+    image = _add_image(viewer)
+    _run(panel, scale, image)
+    viewer.layers.remove(viewer.layers["scale"])
+    assert "no layer" in panel._table.item(_row(panel, "scale"), 2).text()
+
+    panel._tickle("scale", True)
+    panel._produce_()
+    qtbot.waitUntil(lambda: panel._producing is None, timeout=30_000)
+
+    # Back, from the store: the output was never lost, so nothing ran.
+    assert np.allclose(viewer.layers["scale"].data, image.data * 2)
+    assert len(panel._recorder.graph().runs_of("scale")) == 1
+    assert "again" in panel._status.text()
+    assert "no layer" not in panel._table.item(_row(panel, "scale"), 2).text()
+
+
+def test_the_same_op_on_another_input_is_a_step_of_its_own(viewer, panel):
+    first = _add_image(viewer)
+    second = viewer.add_image(np.full((8, 8), 3, dtype="float32"), name="second")
+
+    _run(panel, scale, first)
+    _run(panel, scale, second)
+    _run(panel, scale, second, factor=5.0)
+
+    graph = panel._recorder.graph()
+    assert graph.steps() == ["scale", "scale_2"]
+    assert len(graph.runs_of("scale_2")) == 2
+    # Two results, side by side, rather than one overwriting the other.
+    assert np.allclose(viewer.layers["scale"].data, first.data * 2)
+    assert np.allclose(viewer.layers["scale_2"].data, second.data * 5)
+
+
+def _wheel(canvas, delta, modifiers):
+    from qtpy.QtCore import QPoint, QPointF
+    from qtpy.QtGui import QWheelEvent
+
+    centre = QPointF(canvas.viewport().rect().center())
+    return QWheelEvent(
+        centre,
+        QPointF(canvas.viewport().mapToGlobal(centre.toPoint())),
+        QPoint(0, 0),
+        QPoint(0, delta),
+        Qt.MouseButton.NoButton,
+        modifiers,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+
+
+def test_ctrl_wheel_zooms_the_graph_and_a_plain_wheel_is_left_to_the_panel(
+    viewer, panel
+):
+    _two_steps(viewer, panel)
+    canvas = panel._canvas
+    before = canvas.transform().m11()
+
+    plain = _wheel(canvas, 120, Qt.KeyboardModifier.NoModifier)
+    canvas.wheelEvent(plain)
+    assert not plain.isAccepted()  # passed up, so the panel scrolls
+    assert canvas.transform().m11() == before
+
+    ctrl = _wheel(canvas, 120, Qt.KeyboardModifier.ControlModifier)
+    canvas.wheelEvent(ctrl)
+    assert ctrl.isAccepted()
+    assert canvas.transform().m11() > before
+
+
+def test_a_zoom_survives_a_redraw_until_asked_to_fit(viewer, panel):
+    _two_steps(viewer, panel)
+    canvas = panel._canvas
+    fitted = canvas.transform().m11()
+
+    canvas.zoom(2.0)
+    zoomed = canvas.transform().m11()
+    panel.select("scale")  # redraws the graph
+
+    assert canvas.transform().m11() == pytest.approx(zoomed)
+    canvas.fit()
+    # Not exact: the selected node's heavier border widens what is fitted.
+    assert canvas.transform().m11() == pytest.approx(fitted, rel=0.02)
+
+
+def test_dragging_the_graph_pans_it_rather_than_selecting(viewer, panel, qtbot):
+    _two_steps(viewer, panel)
+    panel.select("scale")
+    canvas = panel._canvas
+    canvas.zoom(3.0)
+    start = canvas.viewport().rect().center()
+
+    qtbot.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, pos=start)
+    qtbot.mouseMove(canvas.viewport(), start + start / 4)
+    qtbot.mouseRelease(
+        canvas.viewport(), Qt.MouseButton.LeftButton, pos=start + start / 4
+    )
+
+    assert panel._selected == "scale"

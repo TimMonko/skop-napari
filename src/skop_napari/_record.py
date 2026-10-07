@@ -128,9 +128,17 @@ def _runs(node: Node) -> str:
     return f"{count} ({failed} failed)" if failed else str(count)
 
 
-def _states(node: Node) -> str:
+#: Not a state of the step -- the log does not know about layers -- but of
+#: what the viewer is showing of it, which is the next thing a reader asks.
+_UNSHOWN = "👻 no layer"
+
+
+def _states(node: Node, unshown: bool = False) -> str:
     flags = node.flags or ("fresh",)
-    return " · ".join(SIGNALS.get(flag, flag) for flag in flags)
+    words = [SIGNALS.get(flag, flag) for flag in flags]
+    if unshown:
+        words.append(_UNSHOWN)
+    return " · ".join(words)
 
 
 def _why(node: Node) -> str:
@@ -317,6 +325,10 @@ class RecordPanel(QWidget):
         if self._selected not in steps:
             self._selected = None
 
+        #: Steps with an output no layer is drawing: deleted, usually.
+        self._unshown = {
+            node.step for node in view.nodes if self._host.unshown(node.step)
+        }
         self._rebuild_inputs(graph)
         self._rebuild_table(view, graph)
         self._draw_graph(view, graph)
@@ -422,7 +434,15 @@ class RecordPanel(QWidget):
             _OUT: (_makes(node), _makes(node)),
             _PARAMS: (_settings(node), _settings(node)),
             _RUNS: (_runs(node), "Runs of this step; the newest good one stands."),
-            _STATE: (_states(node), _why(node)),
+            _STATE: (
+                _states(node, node.step in self._unshown),
+                _why(node)
+                + (
+                    " Its layer is gone; Produce draws it again."
+                    if node.step in self._unshown
+                    else ""
+                ),
+            ),
         }
         for column, (text, tip) in cells.items():
             item = QTableWidgetItem(text)
@@ -584,20 +604,32 @@ class RecordPanel(QWidget):
             partial(self._session.produce, targets),
             _start_thread=False,
             _connect={
-                "returned": self._produced,
+                "returned": partial(self._produced, targets),
                 "errored": partial(self._produce_failed, targets),
                 "finished": self._produce_finished,
             },
         )
         self._producing.start()
 
-    def _produced(self, ran: list[str]) -> None:
-        for step in ran:
+    def _produced(self, targets: list[str], ran: list[str]) -> None:
+        """Draw what ran, and any target whose layer was deleted.
+
+        A deleted result is drawn again from the store. Its output was never
+        lost, and running the op again would only make the same pixels at the
+        cost of the run.
+        """
+        redrawn = [t for t in targets if t not in ran and self._host.unshown(t)]
+        for step in [*ran, *redrawn]:
             try:
                 self._host.show(step)
             except Exception:  # noqa: BLE001 -- a scalar output has no layer.
                 _log.info("Nothing to draw for %r", step)
-        self._status.setText(f"Ran {', '.join(ran)}." if ran else "Already up to date.")
+        said = []
+        if ran:
+            said.append(f"Ran {', '.join(ran)}.")
+        if redrawn:
+            said.append(f"Drew {', '.join(redrawn)} again, from what was stored.")
+        self._status.setText(" ".join(said) or "Already up to date.")
 
     def _produce_failed(self, targets: list[str], exc: Exception) -> None:
         _log.error("Could not produce %s", targets, exc_info=exc)

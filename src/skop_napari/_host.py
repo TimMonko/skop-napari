@@ -424,25 +424,21 @@ class Host:
         """Draw a step's current run as its layer, linked in the metadata.
 
         The role comes from the op, so a labels output lands in a labels layer
-        rather than an image one. An op with several outputs wants one layer
-        each, which is not built yet.
+        rather than an image one. An op with several outputs gets a layer for
+        each, named ``step.output``; one with a single output, ``step``.
         """
         run = self.recorder.graph().current(step)
         if run is None:
             raise KeyError(f"no successful run of {step!r} to draw")
-        if len(run.outputs) > 1:
-            raise NotImplementedError(
-                f"{step!r} has {len(run.outputs)} outputs; drawing more than "
-                f"one output of a step is not built yet"
-            )
-        existing = self._view_of_step(step)
-        view_id = existing.id if existing is not None else _new_id()
+        several = len(run.outputs) > 1
         drawn = []
         with self.writing():
             for name, handle in run.outputs.items():
+                existing = self._view_of_step(step, name if several else None)
+                view_id = existing.id if existing is not None else _new_id()
                 array = self.recorder.store.get(handle)
                 layer = self.display.show(
-                    step,
+                    f"{step}.{name}" if several else step,
                     array,
                     step=step,
                     role=self.role_of(run.op, name),
@@ -452,12 +448,32 @@ class Host:
                             "step": step,
                             "handle": handle,
                             "run": run.id,
+                            "output": name,
                         }
                     },
                 )
-                self._views[view_id] = _View(view_id, step, handle, array)
+                self._views[view_id] = _View(view_id, step, handle, array, name)
                 drawn.append(layer)
         return drawn
+
+    def unshown(self, step: str) -> list[str]:
+        """The outputs of a step's current run that no layer is drawing.
+
+        Its layer was deleted, say. Nothing is lost -- the output is in the
+        store -- so this is a display question, and the answer is to draw it
+        again rather than to run anything.
+        """
+        run = self.recorder.graph().current(step)
+        if run is None:
+            return []
+        shown = set()
+        for layer in self.display.layers():
+            link = layer.metadata.get(SKOP) or {}
+            if link.get("step") == step:
+                shown.add(link.get("output"))
+        if None in shown:  # drawn by a host that did not say which output
+            return []
+        return [name for name in run.outputs if name not in shown]
 
     def revert(self, step: str) -> list[Layer]:
         """Put a step's recorded output back over its layer, and unmark it.

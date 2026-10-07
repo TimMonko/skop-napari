@@ -131,7 +131,8 @@ class ViewerDisplay:
         if not hasattr(data, "shape"):
             _log.info("%s produced %r, which is not an array to draw", step, data)
             return None
-        existing = self.layer_for(step)
+        output = ((metadata or {}).get(SKOP) or {}).get("output")
+        existing = self.layer_for(step, output)
         if existing is not None:
             existing.data = data
             existing.metadata.update(metadata or {})
