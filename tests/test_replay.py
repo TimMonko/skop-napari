@@ -101,6 +101,19 @@ def viewer(qtbot):
     made.close()
 
 
+@pytest.fixture(autouse=True)
+def private_settings(tmp_path, monkeypatch):
+    """Recent recipes go to a file of the test's own, not the user's."""
+    from qtpy.QtCore import QSettings
+
+    from skop_napari import _replay
+
+    path = str(tmp_path / "settings.ini")
+    monkeypatch.setattr(
+        _replay, "_settings", lambda: QSettings(path, QSettings.Format.IniFormat)
+    )
+
+
 @pytest.fixture
 def panel(viewer):
     specs = [OpSpec.from_op(fn) for fn in OPS]
@@ -407,3 +420,16 @@ def test_a_plane_recipe_runs_over_a_stack(viewer, panel, qtbot, tmp_path):
     flat = viewer.layers["flat"]
     assert flat.data.shape == (3, 8, 8) and (flat.data == 1.0).all()
     assert "flat ran" in panel._status.text() and "per z" in panel._status.text()
+
+
+def test_an_opened_recipe_is_remembered(viewer, panel, tmp_path):
+    viewer.add_image(np.ones((8, 8)), name="image")
+    assert not panel._recent.isEnabled()
+    for name in ("one.json", "two.json", "one.json"):
+        save(_recipe(tmp_path), tmp_path / name)
+        panel.load(tmp_path / name)
+    assert [Path(p).name for p in panel.recent()] == ["one.json", "two.json"]
+    assert panel._recent.isEnabled()
+    panel._open_recent(2)  # two.json
+    assert panel._source == "two.json"
+    assert panel._recent.currentIndex() == 0

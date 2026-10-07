@@ -27,7 +27,7 @@ from magicgui.widgets import Container
 from napari.qt.threading import create_worker
 from napari.utils.notifications import show_error
 from psygnal import Signal
-from qtpy.QtCore import Qt
+from qtpy.QtCore import QSettings, Qt
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -60,6 +60,13 @@ _log = logging.getLogger("skop_napari")
 
 #: What an array input's dropdown says while no layer is chosen.
 _UNCHOSEN = "(choose a layer)"
+#: How many recipe files the Recent list remembers.
+_RECENT = 8
+
+
+def _settings() -> QSettings:
+    """Where the recent recipes are remembered: the user's Qt settings."""
+    return QSettings("skop-napari", "replay")
 
 
 class ReplayPanel(QWidget):
@@ -130,6 +137,8 @@ class ReplayPanel(QWidget):
             "One replay per selected layer, each standing for the recipe's "
             "image input. A layer that fails does not stop the rest."
         )
+        self._recent = QComboBox()
+        self._recent.setToolTip("Recipes opened before.")
         self._last = QPushButton("Open last export")
         self._last.setToolTip("The recipe the Record panel exported last.")
         self._cancel = QPushButton("Cancel")
@@ -141,6 +150,7 @@ class ReplayPanel(QWidget):
 
         top = QHBoxLayout()
         top.addWidget(self._open)
+        top.addWidget(self._recent, 1)
         top.addWidget(self._last)
         top.addStretch(1)
         buttons = QHBoxLayout()
@@ -168,6 +178,8 @@ class ReplayPanel(QWidget):
         self._run.clicked.connect(self.run)
         self._each.clicked.connect(lambda: self.run_on_each())
         self._last.clicked.connect(self._open_last)
+        self._recent.activated.connect(self._open_recent)
+        self._fill_recent()
         self._session.changed.connect(self._last_export_changed)
         self._cancel.clicked.connect(self.cancel)
         self._steps.itemChanged.connect(self._ticked)
@@ -181,8 +193,10 @@ class ReplayPanel(QWidget):
     def load(self, recipe: dict[str, Any] | str | Path) -> None:
         """Open a recipe: a file, or one already read."""
         if isinstance(recipe, (str, Path)):
-            self._source = Path(recipe).name
-            recipe = load(recipe)
+            path = Path(recipe)
+            recipe = load(path)
+            self._source = path.name
+            self._remember(path)
         else:
             self._source = "recipe"
         self._recipe = recipe
@@ -191,6 +205,37 @@ class ReplayPanel(QWidget):
         self._edits = {}
         self._rebuild_steps()
         self._prepare()
+
+    def recent(self) -> list[str]:
+        """The recipe files opened before, newest first."""
+        found = _settings().value("recent", [])
+        return [found] if isinstance(found, str) else list(found or [])
+
+    def _remember(self, path: Path) -> None:
+        kept = [p for p in self.recent() if p != str(path)]
+        _settings().setValue("recent", [str(path), *kept][:_RECENT])
+        self._fill_recent()
+
+    def _fill_recent(self) -> None:
+        self._recent.clear()
+        paths = self.recent()
+        self._recent.addItem("Recent..." if paths else "No recent recipes")
+        for path in paths:
+            self._recent.addItem(Path(path).name, path)
+            self._recent.setItemData(
+                self._recent.count() - 1, path, Qt.ItemDataRole.ToolTipRole
+            )
+        self._recent.setEnabled(bool(paths))
+
+    def _open_recent(self, index: int) -> None:
+        path = self._recent.itemData(index)
+        self._recent.setCurrentIndex(0)
+        if not path:
+            return
+        try:
+            self.load(path)
+        except Exception as exc:  # noqa: BLE001 -- said, not raised
+            self._status.setText(f"Could not open {Path(path).name}: {exc}")
 
     def _open_last(self) -> None:
         recipe = self._session.last_recipe
