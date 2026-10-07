@@ -29,11 +29,11 @@ from napari.layers import Layer
 from psygnal import Signal
 from qtpy.QtCore import QTimer
 
-from skop import OpSpec, Role, Runner, discover
+from skop import OpSpec, OutputSpec, Role, Runner, discover
 from skop_core import Graph, Recorder, RecordingRunner, SimpleStore
 
 from ._host import SKOP, Host
-from ._roles import layer_type_for_role
+from ._roles import layer_args_for, layer_type_for_role
 from ._run import resolve
 
 _log = logging.getLogger("skop_napari")
@@ -55,6 +55,20 @@ def step_name(spec: OpSpec, graph: Graph) -> str:
         return spec.function
     module, _, function = spec.name.rpartition(":")
     return f"{module.rsplit('.', 1)[-1]}_{function}"
+
+
+def _provider() -> str | None:
+    """What provides the ops, as a run records it: scikit-ops and its version.
+
+    Only the package's own version (decision 12); a checkout's commit and the
+    environment's lock digest are not recorded yet.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return f"scikit-ops {version('scikit-ops')}"
+    except PackageNotFoundError:
+        return None
 
 
 class OpRegistry(Mapping[str, Callable[..., Any]]):
@@ -126,20 +140,47 @@ class ViewerDisplay:
         lands in a labels layer, not an image one.
 
         A scalar output has no layer to be. The recorder keeps it; the viewer
-        simply does not draw it.
+        simply does not draw it. Boxes and masks are laid out the way the Ops
+        panel lays them out (``layer_args_for``), so a step brought up to date
+        by Produce looks the way it did when it was first run.
         """
-        if not hasattr(data, "shape"):
+        if not hasattr(data, "shape") or getattr(data, "ndim", 0) == 0:
             _log.info("%s produced %r, which is not an array to draw", step, data)
             return None
-        output = ((metadata or {}).get(SKOP) or {}).get("output")
+        link = dict((metadata or {}).get(SKOP) or {})
+        output = link.get("output") or "result"
+        layer_type = layer_type_for_role(role) or "image"
+        data, extra = layer_args_for(OutputSpec(output, Any, role), data)
+        return self.put(step, output, data, layer_type, {"name": name, **extra}, link)
+
+    def put(
+        self,
+        step: str,
+        output: str,
+        data: Any,
+        layer_type: str,
+        args: dict[str, Any],
+        link: dict[str, Any],
+    ) -> Any:
+        """Draw data as the layer that stands for one output of a step.
+
+        The layer already drawing it is given the new data when it is the same
+        kind of layer: running a step again should move its picture, not pile
+        a second one beside it. A different kind of layer -- the user changed
+        how masks are shown -- replaces it. The link goes in with the layer
+        rather than after it, so no one sees a layer arrive that is not yet
+        known for what it is. The caller brackets this as its own write.
+        """
         existing = self.layer_for(step, output)
-        if existing is not None:
+        if existing is not None and type(existing).__name__.lower() == layer_type:
             existing.data = data
-            existing.metadata.update(metadata or {})
+            existing.metadata[SKOP] = link
             return existing
-        args: dict[str, Any] = {"name": name, "metadata": dict(metadata or {})}
+        if existing is not None:
+            self._viewer.layers.remove(existing)
+        metadata = {**args.get("metadata", {}), SKOP: link}
         return self._viewer.add_layer(
-            Layer.create(data, args, layer_type_for_role(role) or "image")
+            Layer.create(data, {**args, "metadata": metadata}, layer_type)
         )
 
     def layer_for(self, step: str, output: str | None = None) -> Any:
@@ -198,9 +239,13 @@ class Session:
         )
         self.store = SimpleStore(root or tempfile.mkdtemp(prefix="skop-napari-"))
         # The recorder's inner runner is the real one, so an op that names an
-        # environment runs in it. Nothing here calls an op directly.
-        self.recorder = Recorder(self.store, self.runner)
-        self.listener = RecordingRunner(self.recorder, step_for=step_name)
+        # environment runs in it. Nothing here calls an op directly. The step
+        # naming is the recorder's, so a workflow run again by Produce names
+        # its calls the way the first run did.
+        self.recorder = Recorder(
+            self.store, self.runner, version=_provider(), step_for=step_name
+        )
+        self.listener = RecordingRunner(self.recorder)
         self.display = ViewerDisplay(viewer)
         self.host = Host(
             self.recorder,
@@ -281,32 +326,15 @@ class Session:
     ) -> Any:
         """Draw one recorded output as the layer that stands for its step.
 
-        The layer already drawing the step is given the new data, when it is
-        the same kind of layer: running a step again is a new run of the same
-        step, and its picture should move with it rather than pile up beside
-        the old one. A different kind of layer -- the user changed how masks
-        are shown -- replaces it.
-
-        The link goes in with the layer rather than being added after, so
-        that no one sees a layer arrive that is not yet known for what it is.
+        The panel has already laid the data out and chosen the layer type;
+        this links it to the run just recorded and puts it in the viewer
+        (``ViewerDisplay.put``), the same way Produce and Revert do.
         """
-        existing = self.display.layer_for(step, output)
         link = self.host.link(step, output, data)
         if link is None:
             raise KeyError(f"{step!r} has no recorded output {output!r}")
-
         with self.host.writing():
-            if existing is not None and (type(existing).__name__.lower() == layer_type):
-                existing.data = data
-                existing.metadata[SKOP] = link
-                layer = existing
-            else:
-                if existing is not None:
-                    self.viewer.layers.remove(existing)
-                metadata = {**args.get("metadata", {}), SKOP: link}
-                layer = self.viewer.add_layer(
-                    Layer.create(data, {**args, "metadata": metadata}, layer_type)
-                )
+            layer = self.display.put(step, output, data, layer_type, args, link)
         self.changed.emit()
         return layer
 
@@ -316,13 +344,10 @@ class Session:
         """Bring the targets up to date through the runner, and say what ran.
 
         Blocks for as long as the ops take, so it belongs on a worker thread.
-        The listener is made ambient so that a workflow that is run again
-        records what it calls, as it did the first time.
+        A workflow run again records what it calls, as it did the first time:
+        the recorder routes a workflow's calls back through itself.
         """
-        from skop import ambient
-
-        with ambient(self.listener):
-            return self.host.produce(targets)
+        return self.host.produce(targets)
 
     # -- keeping up with the viewer --------------------------------------
 
