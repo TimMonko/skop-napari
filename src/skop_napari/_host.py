@@ -345,8 +345,13 @@ class Host:
         ``shown`` is the object the layer will hold, and what an edit is
         measured against: a layer whose data is still that object has not been
         touched. None when the step has no such output.
+
+        The link names the step's newest run, which is the one just made: a
+        cancelled run is not the step's current one, but what it handed back
+        is what the layer shows, and the link must say so.
         """
-        run = self.recorder.graph().current(step)
+        runs = self.recorder.graph().runs_of(step)
+        run = runs[-1] if runs else None
         handle = None if run is None else run.outputs.get(output)
         if run is None or handle is None:
             return None
@@ -421,19 +426,24 @@ class Host:
         return self.recorder.produce(list(targets), self.registry)
 
     def show(self, step: str) -> list[Layer]:
-        """Draw a step's current run as its layer, linked in the metadata.
+        """Draw a step's current output as its layer, linked in the metadata.
 
         The role comes from the op, so a labels output lands in a labels layer
         rather than an image one. An op with several outputs gets a layer for
-        each, named ``step.output``; one with a single output, ``step``.
+        each, named ``step.output``; one with a single output, ``step``. What
+        is drawn is the step's output as it stands -- kept pixels, when an
+        edit was kept, rather than what the run made.
         """
-        run = self.recorder.graph().current(step)
+        graph = self.recorder.graph()
+        run = graph.current(step)
         if run is None:
             raise KeyError(f"no successful run of {step!r} to draw")
         several = len(run.outputs) > 1
         drawn = []
         with self.writing():
-            for name, handle in run.outputs.items():
+            for name in run.outputs:
+                handle = graph.latest(step, name)
+                assert handle is not None
                 existing = self._view_of_step(step, name if several else None)
                 view_id = existing.id if existing is not None else _new_id()
                 array = self.recorder.store.get(handle)
@@ -480,13 +490,53 @@ class Host:
 
         The edit is not deleted -- the log is append-only -- but a revert mark
         supersedes it, so the step stops being edited and nothing downstream
-        stays affected.
+        stays affected. A kept edit reverts the same way, and what read the
+        kept pixels goes stale. The mark comes first, so that what is drawn
+        is the run's output rather than the pixels being let go.
         """
-        edited = self.recorder.graph().is_edited(step)
-        drawn = self.show(step)
-        if edited:
+        graph = self.recorder.graph()
+        if graph.is_edited(step) or graph.is_accepted(step):
             self.recorder.mark_reverted(step)
-        return drawn
+        return self.show(step)
+
+    def keep(self, step: str) -> list[str]:
+        """Keep the hand-made pixels in a step's layers, and say which outputs.
+
+        Each layer drawing the step hands over its data, which the recorder
+        stores as the step's output from then on (decision 34): what reads the
+        step reads them, and what read the old output is stale. The layer is
+        relinked to what was stored, so an op run on it next reads the kept
+        pixels rather than being refused.
+        """
+        run = self._current(step)
+        several = len(run.outputs) > 1
+        kept = []
+        for layer in self.display.layers():
+            found = self._view_of(layer)
+            if found is None or found.step != step:
+                continue
+            output = found.output or next(iter(run.outputs))
+            # The layer's own array, not a copy: the store knows an array by
+            # identity, and this is the object an op will be handed next.
+            array = layer.data if isinstance(layer.data, np.ndarray) else None
+            if array is None:
+                array = np.asarray(layer.data)
+                with self.writing():
+                    layer.data = array
+            event = self.recorder.accept_edit(
+                step, array, output=output if several else None
+            )
+            assert event.handle is not None
+            self._views[found.id] = _View(found.id, step, event.handle, array, output)
+            layer.metadata[SKOP] = {
+                **layer.metadata.get(SKOP, {}),
+                "handle": event.handle,
+            }
+            kept.append(output)
+        if not kept:
+            # No layer to read the pixels from: what the run made is kept.
+            self.recorder.accept_edit(step)
+        return kept
 
     def role_of(self, op_id: str, output: str) -> Role | None:
         """The role an op gives one of its outputs, when the op is known."""
@@ -502,7 +552,7 @@ class Host:
 
     def view(self, targets: list[str] | None = None) -> GraphView:
         """The graph, as a panel or a Mermaid renderer draws it."""
-        return build_view(self.recorder.graph(), self.recorder.store, targets)
+        return build_view(self.recorder.graph(), targets)
 
     # -- keeping in step with the viewer ---------------------------------
 

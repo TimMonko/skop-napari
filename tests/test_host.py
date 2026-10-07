@@ -128,7 +128,7 @@ def test_running_draws_each_step_with_the_role_its_op_declares(tmp_path):
     assert host.display.roles["blurred"] is Role.image
     assert host.display.roles["labels"] is Role.labels
     graph = host.recorder.graph()
-    assert graph.edge(graph.current("labels"), "image") == "blurred"
+    assert graph.sources_of(graph.current("labels")) == {"image": "blurred"}
 
 
 def test_showing_again_moves_the_layer_rather_than_adding_one(tmp_path):
@@ -236,3 +236,68 @@ def test_an_edited_layer_is_refused_rather_than_quietly_replaced(tmp_path):
     assert host.recorder.graph().is_edited("blurred")
     with pytest.raises(UnknownLayer, match="Accept the edit"):
         host.array_for(layer)
+
+
+def test_keeping_an_edit_lets_the_layer_be_run_on(tmp_path):
+    host = make_host(tmp_path, FakeLayer("image", an_image()))
+    host.declare_roots()
+    host.run("blurred", BLUR, {"image": host.display.by_name("image")})
+    host.run("labels", THRESHOLD, {"image": host.display.by_name("blurred")})
+    layer = host.display.by_name("blurred")
+    layer.data = layer.data * 0 - 1.0  # nothing above zero any more
+    host.data_changed(layer)
+    with pytest.raises(UnknownLayer):
+        host.array_for(layer)
+
+    assert host.keep("blurred") == ["result"]
+    graph = host.recorder.graph()
+    assert graph.is_accepted("blurred") and not graph.is_edited("blurred")
+    assert graph.is_stale("labels")
+    assert host.array_for(layer) is layer.data
+    assert host.produce(["labels"]) == ["labels"]
+    labels = host.recorder.store.get(
+        host.recorder.graph().current("labels").outputs["result"]
+    )
+    assert not labels.any()
+
+
+def test_keeping_a_painted_layer_keeps_the_strokes(tmp_path):
+    # Painting changes the array in place: the object is the one recorded,
+    # its pixels are not.
+    host = make_host(tmp_path, FakeLayer("image", an_image()))
+    host.declare_roots()
+    host.run("labels", THRESHOLD, {"image": host.display.by_name("image")})
+    layer = host.display.by_name("labels")
+    layer.data[0, 0] = 7
+    assert host.painted(layer) is True
+    host.keep("labels")
+    kept = host.recorder.store.get(host.recorder.graph().accepted("labels"))
+    assert kept[0, 0] == 7
+
+
+def test_reverting_a_kept_edit_draws_what_the_run_made(tmp_path):
+    host = make_host(tmp_path, FakeLayer("image", an_image()))
+    host.declare_roots()
+    host.run("blurred", BLUR, {"image": host.display.by_name("image")})
+    layer = host.display.by_name("blurred")
+    recorded = layer.data.copy()
+    layer.data = layer.data + 99.0
+    host.data_changed(layer)
+    host.keep("blurred")
+    host.revert("blurred")
+    graph = host.recorder.graph()
+    assert not graph.is_accepted("blurred") and not graph.is_edited("blurred")
+    assert np.array_equal(host.display.by_name("blurred").data, recorded)
+
+
+def test_a_kept_step_is_drawn_from_its_kept_pixels(tmp_path):
+    host = make_host(tmp_path, FakeLayer("image", an_image()))
+    host.declare_roots()
+    host.run("blurred", BLUR, {"image": host.display.by_name("image")})
+    layer = host.display.by_name("blurred")
+    layer.data = np.full_like(layer.data, 5.0)
+    host.data_changed(layer)
+    host.keep("blurred")
+    layer.data = np.zeros_like(layer.data)  # the layer is cleared by mistake
+    host.show("blurred")
+    assert (host.display.by_name("blurred").data == 5.0).all()
