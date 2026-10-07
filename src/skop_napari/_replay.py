@@ -16,12 +16,14 @@ See docs/spec/replay-onto-layers.md for the plan this builds.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import napari.viewer
+from magicgui.widgets import Container
 from napari.qt.threading import create_worker
 from napari.utils.notifications import show_error
 from psygnal import Signal
@@ -38,17 +40,20 @@ from qtpy.QtWidgets import (
     QListWidgetItem,
     QProgressBar,
     QPushButton,
+    QToolBox,
     QVBoxLayout,
     QWidget,
 )
 from superqt.utils import ensure_main_thread
 
-from skop import OpSpec
-from skop_core import Prepared, Replayed, RootNeed, load, prepare
+from skop import NDARRAY, PATH, OpSpec, ParamSpec, type_spec
+from skop_core import Prepared, Replayed, RootNeed, load, prepare, revive
 
+from ._choices import is_workflow_plumbing
 from ._record import _short_op
-from ._roles import input_layer_types
+from ._roles import annotation_for, input_layer_types, value_for
 from ._session import Session, session_for
+from ._widget import Inputs, build_inputs
 
 _log = logging.getLogger("skop_napari")
 
@@ -92,6 +97,10 @@ class ReplayPanel(QWidget):
         self._running: Any = None
         self._task: Any = None
         self._cancel_asked = False
+        #: Each planned step's form, and the values it started from.
+        self._forms: dict[str, tuple[Inputs, dict[str, Any], Container]] = {}
+        #: What the user changed, by step, so a rebuilt form keeps it.
+        self._edits: dict[str, dict[str, Any]] = {}
         #: What the last replay came to, said once it is over.
         self._outcome = ""
 
@@ -107,6 +116,11 @@ class ReplayPanel(QWidget):
         self._steps = QListWidget()
         self._steps.setToolTip(
             "Tick the steps to produce. Everything they need runs too."
+        )
+        self._params = QToolBox()
+        self._params.setToolTip(
+            "Each step's parameters, as the recipe recorded them. What you "
+            "change here is what the replay runs with, and is recorded."
         )
         self._every = QCheckBox("Show every step, not only the ticked ones")
         self._run = QPushButton("Run")
@@ -133,6 +147,8 @@ class ReplayPanel(QWidget):
         column.addLayout(self._inputs)
         column.addWidget(QLabel("<b>Produce</b>"))
         column.addWidget(self._steps, 1)
+        column.addWidget(QLabel("<b>Parameters</b>"))
+        column.addWidget(self._params, 2)
         column.addWidget(self._every)
         column.addLayout(buttons)
         column.addWidget(self._progress)
@@ -159,6 +175,7 @@ class ReplayPanel(QWidget):
         self._recipe = recipe
         self._targets = list(recipe["targets"])
         self._bindings = {}
+        self._edits = {}
         self._rebuild_steps()
         self._prepare()
 
@@ -181,6 +198,7 @@ class ReplayPanel(QWidget):
             self._prepared = prepare(
                 self._recipe, self._host.registry, self._targets or []
             )
+        self._rebuild_params()
         self._refresh()
 
     # -- the steps to produce --------------------------------------------
@@ -327,6 +345,73 @@ class ReplayPanel(QWidget):
     def _needs(self) -> list[RootNeed]:
         return [] if self._prepared is None else list(self._prepared.roots)
 
+    # -- each step's parameters -------------------------------------------
+
+    def _rebuild_params(self) -> None:
+        """One form per step that will run, filled in from the recipe.
+
+        The same forms the Ops panel builds (``build_inputs``), so a recipe's
+        parameters look and behave as they do when the op is run by hand.
+        What a form cannot show -- a step's inputs, which are bound above,
+        a file, or a workflow's choice of op -- keeps the recipe's value.
+        """
+        while self._params.count():
+            self._params.removeItem(0)
+        self._forms = {}
+        prepared = self._prepared
+        if prepared is None or prepared.problems or self._recipe is None:
+            return
+        for step in prepared.steps:
+            entry = self._recipe["steps"][step]
+            spec = OpSpec.from_op(self._host.registry[entry["op"]])
+            inputs = build_inputs(
+                spec,
+                annotation_for,
+                value_for,
+                skip=partial(_not_a_setting, entry),
+            )
+            if not inputs.widgets:
+                continue
+            base = _recorded(spec, entry)
+            edits = self._edits.get(step, {})
+            for widget in inputs.widgets:
+                if widget.name in edits or widget.name in base:
+                    with contextlib.suppress(Exception):
+                        widget.value = edits.get(widget.name, base.get(widget.name))
+                widget.changed.connect(partial(self._param_changed, step, widget.name))
+            container = Container(widgets=inputs.widgets)
+            self._forms[step] = (inputs, base, container)
+            self._params.addItem(container.native, self._form_title(step))
+
+    def _param_changed(self, step: str, name: str, value: Any) -> None:
+        self._edits.setdefault(step, {})[name] = value
+        index = list(self._forms).index(step)
+        self._params.setItemText(index, self._form_title(step))
+
+    def _form_title(self, step: str) -> str:
+        assert self._recipe is not None
+        title = f"{step}  ({_short_op(self._recipe['steps'][step]['op'])})"
+        changed = len(self.overrides().get(step, {})) if step in self._forms else 0
+        return f"{title}  - {changed} changed" if changed else title
+
+    def set_param(self, step: str, name: str, value: Any) -> None:
+        """Change one step's parameter, as editing its form would."""
+        inputs = self._forms[step][0]
+        next(w for w in inputs.widgets if w.name == name).value = value
+
+    def overrides(self) -> dict[str, dict[str, Any]]:
+        """The parameters the user changed from the recipe's, by step."""
+        found: dict[str, dict[str, Any]] = {}
+        for step, (inputs, base, _) in self._forms.items():
+            changed = {
+                name: value
+                for name, value in inputs.values().items()
+                if name not in base or base[name] != value
+            }
+            if changed:
+                found[step] = changed
+        return found
+
     # -- what the panel says ---------------------------------------------
 
     def _refresh(self) -> None:
@@ -398,6 +483,7 @@ class ReplayPanel(QWidget):
             self._session.recorder,
             on_step=ensure_main_thread(self._stepping),
             on_done=ensure_main_thread(partial(self._landed, drawn)),
+            overrides=self.overrides(),
             cancelled=lambda: self._cancel_asked,
             on_start=self._started,
         )
@@ -468,6 +554,29 @@ class ReplayPanel(QWidget):
         self._refresh_state()
         self._status.setText(self._outcome)
         self.finished.emit()
+
+
+def _not_a_setting(entry: dict[str, Any], param: ParamSpec) -> bool:
+    """Whether a parameter is bound elsewhere rather than set in a form."""
+    return (
+        param.name in entry["inputs"]
+        or is_workflow_plumbing(param)
+        or type_spec(param.type).name in (NDARRAY, PATH)
+    )
+
+
+def _recorded(spec: OpSpec, entry: dict[str, Any]) -> dict[str, Any]:
+    """What a step ran with: its defaults, then the recipe's own values.
+
+    As the op declares them -- an enum member, not its value -- so a form
+    shows them, and a comparison with the form tells what was changed.
+    """
+    found = {p.name: p.default for p in spec.params if not p.required}
+    try:
+        found.update(revive(spec, entry["params"]))
+    except KeyError:  # an op ID it cannot resolve: not a form's business
+        found.update(entry["params"])
+    return found
 
 
 def _caution(recipe: dict[str, Any] | None) -> str:

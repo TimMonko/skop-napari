@@ -261,3 +261,44 @@ def test_removing_a_bound_layer_unbinds_it(viewer, panel, tmp_path):
     viewer.layers.remove(image)
     assert panel._bindings == {}
     assert "Choose what stands for image" in panel.why_not()
+
+
+def test_each_step_shows_its_recorded_parameters(viewer, panel, tmp_path):
+    viewer.add_image(np.ones((8, 8)), name="image")
+    panel.load(_recipe(tmp_path))
+    assert set(panel._forms) == {"scaled", "mask"}
+    inputs = panel._forms["scaled"][0]
+    assert {w.name: w.value for w in inputs.widgets} == {"factor": 3.0}
+    assert panel.overrides() == {}
+
+
+def test_a_changed_parameter_is_what_runs_and_is_recorded(
+    viewer, panel, qtbot, tmp_path
+):
+    viewer.add_image(np.full((8, 8), 0.5, dtype="float32"), name="image")
+    panel.load(_recipe(tmp_path))
+    panel.set_param("scaled", "factor", 1.0)
+    assert panel.overrides() == {"scaled": {"factor": 1.0}}
+    assert "1 changed" in panel._params.itemText(0)
+    _replay(panel, qtbot)
+    graph = panel._session.recorder.graph()
+    assert graph.current("scaled").params == {"factor": 1.0}
+    assert not viewer.layers["mask"].data.any()  # 0.5 is not above 1
+
+
+def test_an_edit_survives_ticking_another_target(viewer, panel, tmp_path):
+    viewer.add_image(np.ones((8, 8)), name="image")
+    panel.load(_recipe(tmp_path))
+    panel.set_param("scaled", "factor", 7.0)
+    panel.set_targets(["scaled"])
+    assert set(panel._forms) == {"scaled"}
+    assert panel.overrides() == {"scaled": {"factor": 7.0}}
+
+
+def test_a_parameter_left_at_its_default_is_not_an_override(viewer, panel, tmp_path):
+    viewer.add_image(np.ones((8, 8)), name="image")
+    panel.load(_recipe(tmp_path))
+    # 'mask' recorded no level, so the op's default stands and is shown.
+    inputs = panel._forms["mask"][0]
+    assert {w.name: w.value for w in inputs.widgets} == {"level": 1.0}
+    assert panel.overrides() == {}

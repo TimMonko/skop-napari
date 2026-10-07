@@ -1,9 +1,10 @@
 # Spec — replaying a recipe onto layers
 
-**Status:** phase 1 built (`_replay.py`, `Host.bind`/`Host.replay`,
-`skop_core.prepare`). The review questions below were answered with the
-recommendations: a separate widget, targets drawn by default, `otsu_2` on a
-collision, always run, parameters (phase 2) before axes (phase 3).
+**Status:** phases 1 and 2 are built: `_replay.py`, `Host.bind` and
+`Host.replay`, and `skop_core.prepare`, with a parameter form per step. The
+review questions below were settled with the recommendations: a separate
+widget, targets drawn by default, `otsu_2` on a collision, always run, and
+parameters (phase 2) before axes (phase 3).
 
 ## Goal
 
