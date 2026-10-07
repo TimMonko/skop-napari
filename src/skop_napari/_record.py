@@ -666,6 +666,8 @@ class RecordPanel(QWidget):
         targets = sorted(self._targets) or None
         recipe = export(self._recorder.graph(), targets, self._recorder.store)
         save(recipe, path)
+        self._session.last_recipe = recipe
+        self._session.changed.emit()
         caution = recipe["caution"]
         said = [f"Wrote {len(recipe['steps'])} steps to {Path(path).name}."]
         if caution["edited"] or caution["affected"]:

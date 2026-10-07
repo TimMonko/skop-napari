@@ -57,7 +57,15 @@ def interrupted(image: ImageOf[np.ndarray]) -> ImageOf[np.ndarray]:
     return np.asarray(image)
 
 
-OPS = (scale, above, weighted, stops, interrupted)
+@op()
+def picky(image: ImageOf[np.ndarray]) -> ImageOf[np.ndarray]:
+    """Fails on bright images, so a batch can fail on one layer of several."""
+    if np.asarray(image).max() > 100:
+        raise ValueError("too bright")
+    return np.asarray(image) * 3.0
+
+
+OPS = (scale, above, weighted, stops, interrupted, picky)
 REGISTRY = {OpSpec.from_op(fn).name: fn for fn in OPS}
 
 
@@ -302,3 +310,68 @@ def test_a_parameter_left_at_its_default_is_not_an_override(viewer, panel, tmp_p
     inputs = panel._forms["mask"][0]
     assert {w.name: w.value for w in inputs.widgets} == {"level": 1.0}
     assert panel.overrides() == {}
+
+
+def test_running_on_each_selected_layer(viewer, panel, qtbot, tmp_path):
+    a = viewer.add_image(np.ones((8, 8)), name="a")
+    bright = viewer.add_image(np.full((8, 8), 500.0), name="bright")
+    b = viewer.add_image(np.full((8, 8), 0.1), name="b")
+    recorder = Recorder(SimpleStore(tmp_path / "recorded"), InProcess())
+    image = np.ones((8, 8), dtype="float32")
+    recorder.root("image", image)
+    scaled = recorder.run(picky, "scaled", {"image": image})
+    recorder.run(above, "mask", {"image": scaled})
+    panel.load(export(recorder.graph(), ["mask"], recorder.store))
+    with qtbot.waitSignal(panel.finished, timeout=60_000):
+        panel.run_on_each([a, bright, b])
+    qtbot.wait(50)
+    status = panel._status.text()
+    assert status.startswith("Ran on 2 of 3 layers.")
+    assert "bright: ValueError: too bright" in status
+    graph = panel._session.recorder.graph()
+    sources = {
+        graph.sources_of(graph.current(step))["image"]
+        for step in graph.steps()
+        if step.startswith("scaled") and graph.current(step)
+    }
+    assert sources == {"root:a", "root:b"}
+    names = [layer.name for layer in viewer.layers]
+    assert {"mask", "mask_2"} <= set(names)
+
+
+def test_running_on_each_wants_one_image_input(viewer, panel, tmp_path):
+    viewer.add_image(np.ones((8, 8)), name="image")
+    panel.load(_recipe(tmp_path))
+    assert panel.why_not_each() is None
+    recipe = _recipe(tmp_path)
+    recipe["roots"]["second"] = {"ndim": 2, "dtype": "float32"}
+    recipe["steps"]["mask"]["inputs"]["image"] = {"root": "second"}
+    recipe["targets"] = ["scaled", "mask"]  # two steps, two inputs
+    panel.load(recipe)
+    assert "one image input" in panel.why_not_each()
+
+
+def test_selected_layers_that_do_not_fit_are_left_out(viewer, panel, tmp_path):
+    viewer.add_image(np.ones((8, 8)), name="image")
+    stack = viewer.add_image(np.ones((3, 8, 8)), name="stack")
+    panel.load(_recipe(tmp_path))
+    panel.run_on_each([stack])
+    assert "None of the selected layers fits" in panel._status.text()
+
+
+def test_the_record_panels_last_export_can_be_opened(viewer, panel, tmp_path):
+    record = RecordPanel(viewer)
+    viewer.window.add_dock_widget(record)
+    image = viewer.add_image(np.ones((8, 8)), name="image")
+    session = panel._session
+    session.recording = True
+    steps: list[str] = []
+    result = session.executor.run(
+        scale, {"image": image.data}, on_recorded=steps.append
+    )
+    session.draw(steps[0], "result", result, "image", {"name": steps[0]})
+    assert not panel._last.isEnabled()
+    record.export_recipe(tmp_path / "exported.json")
+    assert panel._last.isEnabled()
+    panel._last.click()
+    assert list(panel._recipe["steps"]) == [steps[0]]

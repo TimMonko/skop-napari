@@ -124,6 +124,13 @@ class ReplayPanel(QWidget):
         )
         self._every = QCheckBox("Show every step, not only the ticked ones")
         self._run = QPushButton("Run")
+        self._each = QPushButton("Run on each selected layer")
+        self._each.setToolTip(
+            "One replay per selected layer, each standing for the recipe's "
+            "image input. A layer that fails does not stop the rest."
+        )
+        self._last = QPushButton("Open last export")
+        self._last.setToolTip("The recipe the Record panel exported last.")
         self._cancel = QPushButton("Cancel")
         self._cancel.setVisible(False)
         self._progress = QProgressBar()
@@ -133,9 +140,11 @@ class ReplayPanel(QWidget):
 
         top = QHBoxLayout()
         top.addWidget(self._open)
+        top.addWidget(self._last)
         top.addStretch(1)
         buttons = QHBoxLayout()
         buttons.addWidget(self._run)
+        buttons.addWidget(self._each)
         buttons.addWidget(self._cancel)
         buttons.addStretch(1)
         column = QVBoxLayout(self)
@@ -156,6 +165,9 @@ class ReplayPanel(QWidget):
 
         self._open.clicked.connect(self._open_dialog)
         self._run.clicked.connect(self.run)
+        self._each.clicked.connect(lambda: self.run_on_each())
+        self._last.clicked.connect(self._open_last)
+        self._session.changed.connect(self._last_export_changed)
         self._cancel.clicked.connect(self.cancel)
         self._steps.itemChanged.connect(self._ticked)
         layers = napari_viewer.layers.events
@@ -178,6 +190,20 @@ class ReplayPanel(QWidget):
         self._edits = {}
         self._rebuild_steps()
         self._prepare()
+
+    def _open_last(self) -> None:
+        recipe = self._session.last_recipe
+        if recipe is not None:
+            self.load(recipe)
+            self._source = "the last export"
+            self._refresh_state()
+
+    def _last_export_changed(self) -> None:
+        try:
+            self._last.setEnabled(self._session.last_recipe is not None)
+        except RuntimeError:
+            # The panel was closed; the session outlived it.
+            self._session.changed.disconnect(self._last_export_changed)
 
     def _open_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -434,6 +460,11 @@ class ReplayPanel(QWidget):
         reason = self.why_not()
         self._run.setEnabled(reason is None)
         self._run.setToolTip(reason or "Run the recipe on these layers.")
+        each = self.why_not_each()
+        self._each.setEnabled(each is None)
+        if each is not None:
+            self._each.setToolTip(each)
+        self._last.setEnabled(self._session.last_recipe is not None)
         if self._running is None:
             self._status.setText(reason or "Ready.")
 
@@ -457,36 +488,125 @@ class ReplayPanel(QWidget):
     def run(self) -> None:
         """Replay the recipe on the chosen layers, off the GUI thread."""
         reason = self.why_not()
+        if reason is not None:
+            self._status.setText(reason)
+            return
+        self._start([("", dict(self._bindings))])
+
+    def run_on_each(self, layers: list[Any] | None = None) -> None:
+        """Replay once per layer, each standing for the recipe's image input.
+
+        Batch, with layers for files: one replay per layer, carrying on past a
+        layer that fails and saying which did (decision 19). ``layers``
+        defaults to the viewer's selection; layers that do not fit the input
+        are left out.
+        """
+        reason = self.why_not_each()
+        if reason is not None:
+            self._status.setText(reason)
+            return
+        need = self._single_array()
+        assert need is not None
+        chosen = list(self._viewer.layers.selection) if layers is None else layers
+        offered = self.candidates(need)
+        fitting = [layer for layer in chosen if layer in offered]
+        if not fitting:
+            self._status.setText(
+                f"None of the selected layers fits {need.name!r}: select the "
+                f"layers to run on."
+            )
+            return
+        others = {k: v for k, v in self._bindings.items() if k != need.name}
+        self._start([(layer.name, {**others, need.name: layer}) for layer in fitting])
+
+    def why_not_each(self) -> str | None:
+        """Why Run on each is not possible now, in words; None when it is."""
+        if self._running is not None:
+            return "A replay is running."
+        if self._recipe is None or self._prepared is None:
+            return "Open a recipe to replay."
+        if not self._targets:
+            return "Tick at least one step to produce."
+        if self._prepared.problems:
+            return " ".join(self._prepared.problems)
+        arrays = [n for n in self._needs() if not n.is_path]
+        if len(arrays) != 1:
+            return (
+                f"Running on each layer takes a recipe with one image input; "
+                f"this one has {len(arrays)}."
+            )
+        unbound = [
+            n.name for n in self._needs() if n.is_path and n.name not in self._bindings
+        ]
+        if unbound:
+            return f"Choose what stands for {', '.join(unbound)}."
+        return None
+
+    def _single_array(self) -> RootNeed | None:
+        arrays = [n for n in self._needs() if not n.is_path]
+        return arrays[0] if len(arrays) == 1 else None
+
+    def _start(self, jobs: list[tuple[str, dict[str, Any]]]) -> None:
+        """Bind each job's layers here, then replay them all on a worker.
+
+        Binding touches the layers, so it happens on the GUI thread; a job
+        whose layers cannot be bound -- an edited one, say -- is reported as
+        failed without stopping the others.
+        """
         prepared = self._prepared
-        if reason is not None or prepared is None:
-            self._status.setText(reason or "Nothing to run.")
-            return
-        try:
-            roots = self._host.bind(prepared, self._bindings)
-            prepared.check(roots)
-        except Exception as exc:  # noqa: BLE001 -- said, not raised
-            self._status.setText(f"{type(exc).__name__}: {exc}")
-            return
+        assert prepared is not None
+        bound: list[tuple[str, dict[str, Any] | None, Exception | None]] = []
+        for label, chosen in jobs:
+            try:
+                roots = self._host.bind(prepared, chosen)
+                prepared.check(roots)
+            except Exception as exc:  # noqa: BLE001 -- reported per job
+                bound.append((label, None, exc))
+            else:
+                bound.append((label, roots, None))
 
         drawn = set(prepared.steps if self._every.isChecked() else prepared.targets)
+        overrides = self.overrides()
+        steps = len(prepared.steps)
         self._cancel_asked = False
         self._task = None
         self._outcome = ""
-        self._progress.setRange(0, len(prepared.steps))
+        self._progress.setRange(0, steps * len(jobs))
         self._progress.setValue(0)
         self._progress.setVisible(True)
         self._cancel.setVisible(True)
         self._cancel.setEnabled(True)
-        work = partial(
-            prepared.run,
-            roots,
-            self._session.recorder,
-            on_step=ensure_main_thread(self._stepping),
-            on_done=ensure_main_thread(partial(self._landed, drawn)),
-            overrides=self.overrides(),
-            cancelled=lambda: self._cancel_asked,
-            on_start=self._started,
-        )
+        recorder = self._session.recorder
+        landed = ensure_main_thread(partial(self._landed, drawn))
+
+        def work() -> list[tuple[str, Replayed | None, Exception | None]]:
+            outcomes: list[tuple[str, Replayed | None, Exception | None]] = []
+            for number, (label, roots, failed) in enumerate(bound):
+                if self._cancel_asked:
+                    break
+                if roots is None:
+                    outcomes.append((label, None, failed))
+                    continue
+                try:
+                    done = prepared.run(
+                        roots,
+                        recorder,
+                        on_step=ensure_main_thread(
+                            partial(self._stepping, number, len(bound), label)
+                        ),
+                        on_done=landed,
+                        overrides=overrides,
+                        cancelled=lambda: self._cancel_asked,
+                        on_start=self._started,
+                    )
+                except Exception as exc:  # noqa: BLE001 -- reported per job
+                    outcomes.append((label, None, exc))
+                    continue
+                outcomes.append((label, done, None))
+                if done.cancelled:
+                    break
+            return outcomes
+
         # NB: connected through _connect, for the reason the Ops panel gives:
         # the worker starts at once, and an error with no handler is re-raised
         # into the event loop.
@@ -494,13 +614,13 @@ class ReplayPanel(QWidget):
             work,
             _start_thread=False,
             _connect={
-                "returned": self._returned,
+                "returned": partial(self._returned, len(jobs)),
                 "errored": self._errored,
                 "finished": self._finished,
             },
         )
         self._refresh_state()
-        self._status.setText(f"Replaying {len(prepared.steps)} steps...")
+        self._status.setText(f"Replaying {steps} steps...")
         self._running.start()
 
     def cancel(self) -> None:
@@ -516,10 +636,20 @@ class ReplayPanel(QWidget):
         if self._cancel_asked:
             task.cancel()
 
-    def _stepping(self, index: int, total: int, step: str, session: str) -> None:
-        self._progress.setValue(index)
+    def _stepping(
+        self,
+        job: int,
+        jobs: int,
+        label: str,
+        index: int,
+        total: int,
+        step: str,
+        session: str,
+    ) -> None:
+        self._progress.setValue(job * total + index)
         named = step if session == step else f"{step} (as {session})"
-        self._status.setText(f"Step {index + 1} of {total}: {named}")
+        where = f"{label} ({job + 1} of {jobs}): " if jobs > 1 else ""
+        self._status.setText(f"{where}step {index + 1} of {total}: {named}")
 
     def _landed(self, drawn: set[str], step: str, session: str) -> None:
         """A step was recorded: draw it if it is one to show, and say so."""
@@ -531,17 +661,46 @@ class ReplayPanel(QWidget):
                 _log.info("Nothing to draw for %r", session)
         self._session.changed.emit()
 
-    def _returned(self, done: Replayed) -> None:
-        ran = len(done.steps)
-        self._outcome = (
-            f"Cancelled after {ran} steps."
-            if done.cancelled
-            else f"Replayed {ran} steps."
-        )
+    def _returned(
+        self,
+        jobs: int,
+        outcomes: list[tuple[str, Replayed | None, Exception | None]],
+    ) -> None:
+        failed = [(label, exc) for label, _, exc in outcomes if exc is not None]
+        for label, exc in failed:
+            _log.error(
+                "Replay on %s failed", label or "the chosen layers", exc_info=exc
+            )
+        cancelled = any(done is not None and done.cancelled for _, done, _ in outcomes)
+        if jobs == 1:
+            ((_, done, exc),) = outcomes or [("", None, None)]
+            if exc is not None:
+                # The steps before the failure were recorded and drawn as
+                # they landed; the failed one is recorded as failed.
+                show_error(f"Replay failed: {exc}")
+                self._outcome = f"{type(exc).__name__}: {exc}"
+            elif done is not None and done.cancelled:
+                self._outcome = f"Cancelled after {len(done.steps)} steps."
+            elif done is not None:
+                self._outcome = f"Replayed {len(done.steps)} steps."
+            else:
+                self._outcome = "Cancelled before anything ran."
+            return
+        ok = len(outcomes) - len(failed)
+        said = [f"Ran on {ok} of {jobs} layers."]
+        if cancelled or len(outcomes) < jobs:
+            said.append("Cancelled before the rest.")
+        if failed:
+            said.append(
+                "Failed: "
+                + "; ".join(
+                    f"{label}: {type(exc).__name__}: {exc}" for label, exc in failed
+                )
+            )
+            show_error(f"Replay failed on {', '.join(label for label, _ in failed)}")
+        self._outcome = " ".join(said)
 
     def _errored(self, exc: Exception) -> None:
-        # The steps before the failure were recorded and drawn as they
-        # landed; the failed one is recorded as failed.
         _log.error("Replay failed", exc_info=exc)
         show_error(f"Replay failed: {exc}")
         self._outcome = f"{type(exc).__name__}: {exc}"

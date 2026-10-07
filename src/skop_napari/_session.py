@@ -255,6 +255,8 @@ class Session:
         # So that an op ID a recipe holds can be turned back into its op.
         self.recorder.registry = self.host.registry
         self._recording = False
+        #: The recipe the Record panel exported last, for the Replay panel.
+        self.last_recipe: dict[str, Any] | None = None
         #: Root layers painted on, waiting for the strokes to stop. A stroke
         #: reports on every mouse move, and a root is stored whole.
         self._painted_roots: dict[int, Any] = {}
