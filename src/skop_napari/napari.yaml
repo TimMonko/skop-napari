@@ -1,10 +1,10 @@
 name: skop-napari
 display_name: scikit-ops
 
-# NB: three widgets, and the count is the point. napari nests a plugin's
+# NB: four widgets, and that there is more than one is the point. napari nests a plugin's
 # widgets under its own name only when the plugin contributes more than one --
 # with a single widget the entry sits flat as "scikit-ops: Ops". So this is
-# what produces Plugins > scikit-ops > {Ops, Workflows, Record}.
+# what produces Plugins > scikit-ops > {Ops, Workflows, Record, Replay}.
 #
 # None of them names an op. A per-workflow menu item would mean this manifest
 # holding function names that live in the other repository, where a rename
@@ -21,6 +21,9 @@ contributions:
     - id: skop-napari.record_panel
       title: Record
       python_name: skop_napari._record:RecordPanel
+    - id: skop-napari.replay_panel
+      title: Replay
+      python_name: skop_napari._replay:ReplayPanel
   widgets:
     - command: skop-napari.ops_panel
       display_name: Ops
@@ -28,3 +31,5 @@ contributions:
       display_name: Workflows
     - command: skop-napari.record_panel
       display_name: Record
+    - command: skop-napari.replay_panel
+      display_name: Replay

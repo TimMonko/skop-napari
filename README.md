@@ -2,7 +2,7 @@
 
 Run [scikit-ops](https://github.com/apposed/scikit-ops) ops from napari.
 
-Adds three dock widgets under *Plugins → scikit-ops*:
+Adds four dock widgets under *Plugins → scikit-ops*:
 
 - **Ops** lists every op skop can discover, builds a form for the chosen one,
   and runs it in its own Appose environment — off the GUI thread, with
@@ -14,6 +14,9 @@ Adds three dock widgets under *Plugins → scikit-ops*:
   a graph of what was made from what, which steps are stale, edited or kept,
   *Produce* to bring ticked steps up to date, and *Export recipe…* to write
   a recipe a script can replay. It runs nothing itself.
+- **Replay** opens a recipe, binds each of its inputs to a layer (or a file),
+  and runs it off the GUI thread, with progress and Cancel. Results arrive as
+  layers and are recorded like any other run, so the Record panel shows them.
 
 ```sh
 uv sync --all-groups
@@ -60,6 +63,7 @@ src/skop_napari/_host.py     recording bookkeeping: layers <-> runs (no napari)
 src/skop_napari/_session.py  one recorder, store and runner per viewer
 src/skop_napari/_graph.py    the Record panel's graph canvas
 src/skop_napari/_record.py   the Record widget
+src/skop_napari/_replay.py   the Replay widget
 ```
 
 `_widget.py` deliberately imports nothing from napari: the one napari-shaped
