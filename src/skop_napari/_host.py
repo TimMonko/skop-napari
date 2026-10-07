@@ -28,6 +28,7 @@ from typing import Any, Protocol
 import numpy as np
 
 from skop import OpSpec, Role
+from skop.types import Array
 from skop_core import Handle, Recorder
 from skop_visual import GraphView
 from skop_visual import view as build_view
@@ -50,6 +51,17 @@ def _is_layer(value: Any) -> bool:
     a step already read. Only a layer has metadata, so that is the tell.
     """
     return hasattr(value, "data") and hasattr(value, "metadata")
+
+
+def _data_of(layer: Layer) -> Any:
+    """A layer's data as the recorder will hold it: itself, when array-shaped.
+
+    numpy, dask, zarr and xarray are all handed over as they are. Anything
+    else -- a list, a multiscale pyramid -- has no single identity to hold,
+    so it is made into one numpy array, once.
+    """
+    data = layer.data
+    return data if isinstance(data, Array) else np.asarray(data)
 
 
 class UnknownLayer(ValueError):
@@ -231,7 +243,9 @@ class Host:
         return handle
 
     def _store_root(self, layer: Layer, view_id: str, name: str) -> Handle:
-        array = np.asarray(layer.data)
+        # The layer's own data, not a copy: the recorder holds a root by
+        # reference, so a lazy layer stays lazy and is never read in full.
+        array = _data_of(layer)
         handle = self.recorder.root(name, array)
         self._owner[name] = view_id
         layer.metadata[SKOP] = {
@@ -518,11 +532,7 @@ class Host:
             output = found.output or next(iter(run.outputs))
             # The layer's own array, not a copy: the store knows an array by
             # identity, and this is the object an op will be handed next.
-            array = layer.data if isinstance(layer.data, np.ndarray) else None
-            if array is None:
-                array = np.asarray(layer.data)
-                with self.writing():
-                    layer.data = array
+            array = _data_of(layer)
             event = self.recorder.accept_edit(
                 step, array, output=output if several else None
             )

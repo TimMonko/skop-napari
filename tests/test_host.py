@@ -85,10 +85,12 @@ def test_a_new_layer_becomes_a_root(tmp_path):
     image = an_image()
     host = make_host(tmp_path, FakeLayer("image", image))
     assert host.declare_roots() == ["image"]
-    assert host.recorder.store.handle_of(image) == "image@v1"
+    handle = host.recorder.graph().current_root("image").handle
+    assert host.recorder.store.handle_of(image) == handle
+    assert host.recorder.store.get(handle) is image  # held, not copied
     link = host.display.by_name("image").metadata[SKOP]
     assert link["step"] is None
-    assert link["handle"] == "image@v1"
+    assert link["handle"] == handle
     assert link["id"]
 
 
@@ -301,3 +303,30 @@ def test_a_kept_step_is_drawn_from_its_kept_pixels(tmp_path):
     layer.data = np.zeros_like(layer.data)  # the layer is cleared by mistake
     host.show("blurred")
     assert (host.display.by_name("blurred").data == 5.0).all()
+
+
+class Lazy:
+    """Array-shaped without being numpy, as a dask or zarr layer's data is."""
+
+    def __init__(self, data):
+        self._data = np.asarray(data)
+        self.shape, self.dtype = self._data.shape, self._data.dtype
+        self.ndim, self.size = self._data.ndim, self._data.size
+        self.reads = 0
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __array__(self, dtype=None, copy=None):
+        self.reads += 1
+        return self._data
+
+
+def test_a_lazy_root_is_held_as_itself_and_never_read(tmp_path):
+    lazy = Lazy(an_image())
+    host = make_host(tmp_path, FakeLayer("image", lazy))
+    host.declare_roots()
+    root = host.recorder.graph().current_root("image")
+    assert host.recorder.store.get(root.handle) is lazy
+    assert host.array_for(host.display.by_name("image")) is lazy
+    assert lazy.reads == 0
