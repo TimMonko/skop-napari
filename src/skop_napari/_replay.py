@@ -49,6 +49,7 @@ from superqt.utils import ensure_main_thread
 from skop import NDARRAY, PATH, OpSpec, ParamSpec, type_spec
 from skop_core import Prepared, Replayed, RootNeed, load, prepare, revive
 
+from ._axes import resolve
 from ._choices import is_workflow_plumbing
 from ._record import _short_op
 from ._roles import annotation_for, input_layer_types, value_for
@@ -281,13 +282,16 @@ class ReplayPanel(QWidget):
         self._refresh()
 
     def candidates(self, need: RootNeed) -> list[Any]:
-        """The layers that may stand for an input: the right type and axes."""
+        """The layers that may stand for an input: the right type and axes.
+
+        More axes than were recorded are fine for an input every reader of
+        which declares its axes: the replay runs plane by plane over them.
+        """
         kinds = input_layer_types(need.role)
         return [
             layer
             for layer in self._viewer.layers
-            if type(layer).__name__.lower() in kinds
-            and (need.ndim is None or layer.ndim == need.ndim)
+            if type(layer).__name__.lower() in kinds and need.fits(layer.ndim)
         ]
 
     def _settle_bindings(self) -> None:
@@ -318,7 +322,12 @@ class ReplayPanel(QWidget):
             if need.is_path:
                 self._inputs.addRow(label, self._path_row(need, tip))
                 continue
-            tip += f" Wants {need.ndim} axes."
+            tip += f" Wants {need.ndim} axes"
+            tip += (
+                ", or more: the extra ones are run over, plane by plane."
+                if need.plannable
+                else "."
+            )
             combo = QComboBox()
             offered = self.candidates(need)
             self._offered[need.name] = offered
@@ -556,7 +565,15 @@ class ReplayPanel(QWidget):
         prepared = self._prepared
         assert prepared is not None
         bound: list[tuple[str, dict[str, Any] | None, Exception | None]] = []
+        names: list[dict[str, tuple[str | None, ...]]] = []
         for label, chosen in jobs:
+            names.append(
+                {
+                    root: resolve(value.data, value, self._viewer).axes
+                    for root, value in chosen.items()
+                    if hasattr(value, "data") and hasattr(value, "metadata")
+                }
+            )
             try:
                 roots = self._host.bind(prepared, chosen)
                 prepared.check(roots)
@@ -581,7 +598,9 @@ class ReplayPanel(QWidget):
 
         def work() -> list[tuple[str, Replayed | None, Exception | None]]:
             outcomes: list[tuple[str, Replayed | None, Exception | None]] = []
-            for number, (label, roots, failed) in enumerate(bound):
+            for number, ((label, roots, failed), axes) in enumerate(
+                zip(bound, names, strict=True)
+            ):
                 if self._cancel_asked:
                     break
                 if roots is None:
@@ -598,6 +617,7 @@ class ReplayPanel(QWidget):
                         overrides=overrides,
                         cancelled=lambda: self._cancel_asked,
                         on_start=self._started,
+                        axes=axes,
                     )
                 except Exception as exc:  # noqa: BLE001 -- reported per job
                     outcomes.append((label, None, exc))
@@ -682,7 +702,7 @@ class ReplayPanel(QWidget):
             elif done is not None and done.cancelled:
                 self._outcome = f"Cancelled after {len(done.steps)} steps."
             elif done is not None:
-                self._outcome = f"Replayed {len(done.steps)} steps."
+                self._outcome = f"Replayed {len(done.steps)} steps." + _planned(done)
             else:
                 self._outcome = "Cancelled before anything ran."
             return
@@ -713,6 +733,16 @@ class ReplayPanel(QWidget):
         self._refresh_state()
         self._status.setText(self._outcome)
         self.finished.emit()
+
+
+def _planned(done: Replayed) -> str:
+    """What a replay planned afresh, said in a sentence; empty when nothing."""
+    said = [
+        f"{step} ran {summary}"
+        for step, plans in done.planned.items()
+        for summary in plans.values()
+    ]
+    return f" {'; '.join(said)}." if said else ""
 
 
 def _not_a_setting(entry: dict[str, Any], param: ParamSpec) -> bool:

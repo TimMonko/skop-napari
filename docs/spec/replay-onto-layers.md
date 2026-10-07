@@ -1,10 +1,12 @@
 # Spec — replaying a recipe onto layers
 
-**Status:** phases 1 and 2 are built: `_replay.py`, `Host.bind` and
-`Host.replay`, and `skop_core.prepare`, with a parameter form per step. The
-review questions below were settled with the recommendations: a separate
-widget, targets drawn by default, `otsu_2` on a collision, always run, and
-parameters (phase 2) before axes (phase 3).
+**Status:** built, except phase 4's recent-recipes list:
+`_replay.py`, `Host.bind`/`Host.replay`, `skop_core.prepare`, parameter forms
+(phase 2), axis plans fitted to the bound data (phase 3, as decision 64 in
+skop-workflows: re-planned rather than recorded as intent), Run on each
+selected layer and Open last export (phase 4). The review questions were
+settled with the recommendations: a separate widget, targets drawn by
+default, `otsu_2` on a collision, always run, and parameters before axes.
 
 ## Goal
 

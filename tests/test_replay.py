@@ -8,11 +8,12 @@ session would have made them, and replayed through the panel.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 import numpy as np
 import pytest
 
-from skop import OpSpec, op
+from skop import Axes, OpSpec, op
 from skop.types import ImageOf, LabelsOf
 from skop_core import InProcess, Recorder, SimpleStore, export, save
 from skop_napari import RecordPanel, ReplayPanel
@@ -65,7 +66,16 @@ def picky(image: ImageOf[np.ndarray]) -> ImageOf[np.ndarray]:
     return np.asarray(image) * 3.0
 
 
-OPS = (scale, above, weighted, stops, interrupted, picky)
+@op()
+def plane(
+    image: Annotated[ImageOf[np.ndarray], Axes("y", "x")],
+) -> ImageOf[np.ndarray]:
+    """Strictly one plane at a time."""
+    assert np.ndim(image) == 2
+    return np.asarray(image) + 1.0
+
+
+OPS = (scale, above, weighted, stops, interrupted, picky, plane)
 REGISTRY = {OpSpec.from_op(fn).name: fn for fn in OPS}
 
 
@@ -375,3 +385,25 @@ def test_the_record_panels_last_export_can_be_opened(viewer, panel, tmp_path):
     assert panel._last.isEnabled()
     panel._last.click()
     assert list(panel._recipe["steps"]) == [steps[0]]
+
+
+def test_a_plane_recipe_runs_over_a_stack(viewer, panel, qtbot, tmp_path):
+    # scikit-ops' Runner adapts axes only for ops that name an environment;
+    # the in-process runner adapts them as its worker would.
+    panel._session.recorder.inner = InProcess()
+    recorder = Recorder(SimpleStore(tmp_path / "recorded"), InProcess())
+    image = np.ones((8, 8), dtype="float32")
+    recorder.root("image", image)
+    recorder.run(plane, "flat", {"image": image})
+    viewer.add_image(np.ones((8, 8)), name="small")
+    stack = viewer.add_image(
+        np.zeros((3, 8, 8)), name="stack", axis_labels=("z", "y", "x")
+    )
+    panel.load(export(recorder.graph(), ["flat"], recorder.store))
+    (need,) = panel._prepared.roots
+    assert stack in panel.candidates(need)
+    panel.bind("image", stack)
+    _replay(panel, qtbot)
+    flat = viewer.layers["flat"]
+    assert flat.data.shape == (3, 8, 8) and (flat.data == 1.0).all()
+    assert "flat ran" in panel._status.text() and "per z" in panel._status.text()
