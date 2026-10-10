@@ -1896,6 +1896,28 @@ requires-dist = [
 dev = [{ name = "pytest" }]
 
 [[package]]
+name = "oprunner"
+version = "0.1.0.dev0"
+source = { editable = "../scikit-ops/oprunner" }
+dependencies = [
+    { name = "appose" },
+    { name = "numpy" },
+    { name = "opspec" },
+    { name = "psutil" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "appose", specifier = ">=0.12" },
+    { name = "numpy" },
+    { name = "opspec", editable = "../scikit-ops/opspec" },
+    { name = "psutil" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest" }]
+
+[[package]]
 name = "opspec"
 version = "0.1.0.dev0"
 source = { editable = "../scikit-ops/opspec" }
@@ -2997,20 +3019,18 @@ name = "scikit-ops"
 version = "0.1.0.dev0"
 source = { editable = "../scikit-ops" }
 dependencies = [
-    { name = "appose" },
     { name = "numpy" },
     { name = "ophelper" },
+    { name = "oprunner" },
     { name = "opspec" },
-    { name = "psutil" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "appose", specifier = ">=0.12" },
     { name = "numpy" },
     { name = "ophelper", editable = "../scikit-ops/ophelper" },
+    { name = "oprunner", editable = "../scikit-ops/oprunner" },
     { name = "opspec", editable = "../scikit-ops/opspec" },
-    { name = "psutil" },
 ]
 
 [package.metadata.requires-dev]
@@ -3110,6 +3130,7 @@ dependencies = [
     { name = "napari" },
     { name = "numpy" },
     { name = "ophelper" },
+    { name = "oprunner" },
     { name = "scikit-ops" },
 ]
 
@@ -3127,6 +3148,7 @@ requires-dist = [
     { name = "napari", specifier = ">=0.5" },
     { name = "numpy" },
     { name = "ophelper", editable = "../scikit-ops/ophelper" },
+    { name = "oprunner", editable = "../scikit-ops/oprunner" },
     { name = "scikit-ops", editable = "../scikit-ops" },
 ]
 
