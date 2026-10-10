@@ -116,7 +116,7 @@ class OpRun:
     def cancel(self) -> None:
         """Ask the op to stop.
 
-        Cooperative: the op stops at its next ``skop.cancel_requested()``
+        Cooperative: the op stops at its next ``cancel_requested()``
         check, and returns whatever it had computed by then. An op that never
         checks runs to completion.
         """

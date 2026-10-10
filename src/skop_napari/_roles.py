@@ -26,8 +26,9 @@ from typing import Any
 
 import napari.types as nt
 import numpy as np
+from ophelper import boxes, masks
 
-from skop import OutputSpec, ParamSpec, Role, boxes, masks
+from skop import OutputSpec, ParamSpec, Role
 
 #: How a stack of masks can be shown, since no layer holds one directly.
 #: Ordered largest object first in every case, so the label a given object
@@ -122,7 +123,7 @@ def value_for(param: ParamSpec, value: Any) -> Any:
     The mirror of :func:`layer_args_for`, and needed for the same reason: a
     Shapes layer's ``.data`` is a list of vertex arrays, one per shape, and an
     op that asked for ``(N, 4)`` boxes gets ``(11, 4, 2)`` without this.
-    ``skop.boxes.from_napari`` takes both that list and the array napari
+    ``ophelper.boxes.from_napari`` takes both that list and the array napari
     sometimes makes of it.
 
     An array already in skop's layout passes through, so an op called with
@@ -147,9 +148,9 @@ def layer_args_for(
     agrees with, which is all of them but two.
 
     **Bounding boxes.** skop states them as ``(N, 4)`` rows of
-    ``[min_y, min_x, max_y, max_x]`` -- see ``skop.boxes`` -- and a Shapes
+    ``[min_y, min_x, max_y, max_x]`` -- see ``ophelper.boxes`` -- and a Shapes
     layer handed that array reads it as one N-vertex shape in 4-D and raises.
-    ``skop.boxes.to_napari`` reshapes it into the ``(N, 2, 2)`` corner pairs a
+    ``ophelper.boxes.to_napari`` reshapes it into the ``(N, 2, 2)`` corner pairs a
     rectangle wants, but only with ``shape_type`` said out loud: napari's
     default for a 2-vertex shape is a rectangle that then complains it was
     given two corners rather than four.

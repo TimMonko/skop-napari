@@ -1878,6 +1878,24 @@ wheels = [
 ]
 
 [[package]]
+name = "ophelper"
+version = "0.1.0.dev0"
+source = { editable = "../scikit-ops/ophelper" }
+dependencies = [
+    { name = "numpy" },
+    { name = "opspec" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy" },
+    { name = "opspec", editable = "../scikit-ops/opspec" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest" }]
+
+[[package]]
 name = "opspec"
 version = "0.1.0.dev0"
 source = { editable = "../scikit-ops/opspec" }
@@ -2981,6 +2999,7 @@ source = { editable = "../scikit-ops" }
 dependencies = [
     { name = "appose" },
     { name = "numpy" },
+    { name = "ophelper" },
     { name = "opspec" },
     { name = "psutil" },
 ]
@@ -2989,6 +3008,7 @@ dependencies = [
 requires-dist = [
     { name = "appose", specifier = ">=0.12" },
     { name = "numpy" },
+    { name = "ophelper", editable = "../scikit-ops/ophelper" },
     { name = "opspec", editable = "../scikit-ops/opspec" },
     { name = "psutil" },
 ]
@@ -3089,6 +3109,7 @@ dependencies = [
     { name = "magicgui" },
     { name = "napari" },
     { name = "numpy" },
+    { name = "ophelper" },
     { name = "scikit-ops" },
 ]
 
@@ -3105,6 +3126,7 @@ requires-dist = [
     { name = "magicgui", specifier = ">=0.8" },
     { name = "napari", specifier = ">=0.5" },
     { name = "numpy" },
+    { name = "ophelper", editable = "../scikit-ops/ophelper" },
     { name = "scikit-ops", editable = "../scikit-ops" },
 ]
 

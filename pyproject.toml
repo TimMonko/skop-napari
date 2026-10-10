@@ -27,6 +27,8 @@ classifiers = [
 requires-python = ">=3.12"
 dependencies = [
     "scikit-ops",
+    # Helpers for boxes and masks, from scikit-ops' repo.
+    "ophelper",
     "napari>=0.5",
     "magicgui>=0.8",
     "numpy",
@@ -56,6 +58,7 @@ packages = ["src/skop_napari"]
 [tool.uv.sources]
 # Developed alongside its base package; drop this once scikit-ops is on PyPI.
 scikit-ops = { path = "../scikit-ops", editable = true }
+ophelper = { path = "../scikit-ops/ophelper", editable = true }
 # Note: the main tip, not the 0.11 release, for PixiInstallMonitor -- it is
 # what gives an environment build real progress to show. Matches the pin in
 # scikit-ops; both move back to the registry once a release carries it.
