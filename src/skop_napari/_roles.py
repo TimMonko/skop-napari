@@ -11,7 +11,7 @@ The adapters exist because a role names what an array *means*, not how napari
 wants it laid out. skop states bounding boxes as ``(N, 4)`` rows of
 ``[min_y, min_x, max_y, max_x]``; napari reads that same array as a single
 shape with N vertices in four dimensions. Reconciling the two is this
-package's job, not skop's -- skop.types imports no GUI, and the layout napari
+package's job, not opspec's -- opspec.types imports no GUI, and the layout napari
 wants is not more correct, only more napari.
 
 Both directions need it, which is easy to forget: ``layer_args_for`` adapts an
@@ -27,8 +27,7 @@ from typing import Any
 import napari.types as nt
 import numpy as np
 from ophelper import boxes, masks
-
-from skop import OutputSpec, ParamSpec, Role
+from opspec.op import OutputSpec, ParamSpec, Role
 
 #: How a stack of masks can be shown, since no layer holds one directly.
 #: Ordered largest object first in every case, so the label a given object

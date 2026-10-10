@@ -6,7 +6,8 @@ the arithmetic underneath it, which is easier to corner here.
 
 from __future__ import annotations
 
-from skop import Slot
+from opspec.op import Slot
+
 from skop_napari._plans import _guided
 
 

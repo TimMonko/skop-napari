@@ -513,7 +513,8 @@ def test_boxes_are_reshaped_but_never_axis_labelled(panel):
     makes it work is indirect -- reshaping (N, 4) to (N, 2, 2) is what stops
     the axis count matching.
     """
-    from skop import OutputSpec, Role
+    from opspec.op import OutputSpec, Role
+
     from skop_napari._roles import layer_args_for
 
     boxes = np.array([[1.0, 2.0, 5.0, 6.0], [3.0, 4.0, 9.0, 8.0]], dtype=np.float32)
@@ -572,7 +573,8 @@ def test_the_mask_view_chooser_appears_only_for_ops_that_return_masks(panel):
 
 
 def test_mask_outputs_are_projected_the_way_the_chooser_says(panel):
-    from skop import OutputSpec, Role
+    from opspec.op import OutputSpec, Role
+
     from skop_napari._roles import layer_args_for, layer_type_for
 
     # A big mask with a small one drawn inside it: the case the projection
@@ -611,7 +613,8 @@ def test_the_3d_stack_gets_an_adjustable_z_spacing(panel):
     shows nothing, which is what the default of 10 is for. y and x stay at 1,
     matching the image the masks were found in.
     """
-    from skop import OutputSpec, Role
+    from opspec.op import OutputSpec, Role
+
     from skop_napari._roles import layer_args_for
 
     stack = np.zeros((3, 10, 10), dtype=np.uint8)

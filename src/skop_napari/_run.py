@@ -13,9 +13,10 @@ from collections.abc import Callable
 from typing import Any
 
 from napari.qt.threading import FunctionWorker, create_worker
+from opspec.op import OpSpec
 from superqt.utils import ensure_main_thread
 
-from skop import OpSpec, Runner
+from skop import Runner
 
 
 def resolve(spec: OpSpec) -> Callable:

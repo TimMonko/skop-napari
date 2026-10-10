@@ -19,10 +19,9 @@ from __future__ import annotations
 from typing import Any
 
 from magicgui.widgets import ComboBox, Container, Label, LineEdit
+from opspec.op import OpSpec, ParamSpec
+from opspec.plan import ITERATE, PASS, SELECT, AdaptationPlan, plan
 from psygnal import Signal
-
-import skop
-from skop import AdaptationPlan, OpSpec, ParamSpec
 
 from . import _axes
 
@@ -196,7 +195,7 @@ class _Row(Container):
         viewer: Any,
         mapping: tuple[int | None, ...] | None,
     ) -> AdaptationPlan:
-        return skop.plan(
+        return plan(
             fn,
             self.param.name,
             data,
@@ -244,17 +243,13 @@ class _Row(Container):
                 if i in plan.mapping:
                     continue
                 options = [
-                    (f"iterate all {shape[i]}", skop.ITERATE),
-                    ("current position", skop.SELECT),
+                    (f"iterate all {shape[i]}", ITERATE),
+                    ("current position", SELECT),
                 ]
                 if self.param.axes.variadic:
-                    options.append(("hand to the op", skop.PASS))
+                    options.append(("hand to the op", PASS))
                 current = (
-                    skop.ITERATE
-                    if i in plan.iterate
-                    else skop.SELECT
-                    if i in selected
-                    else skop.PASS
+                    ITERATE if i in plan.iterate else SELECT if i in selected else PASS
                 )
                 combo = ComboBox(
                     name=f"{self.param.name}_extra{i}",

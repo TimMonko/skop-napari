@@ -35,11 +35,12 @@ from magicgui.widgets import (
 )
 from napari.layers import Layer
 from napari.utils.notifications import notification_manager, show_error
+from opspec.op import OpSpec, Role
 from opspec.tiling import TilePlan, parse_bytes
 from psygnal import Signal
 from superqt.utils import ensure_main_thread
 
-from skop import OpSpec, Role, Runner, discover
+from skop import Runner, discover
 from skop._tiling import DEFAULT_FRACTION, Tiler, default_budget
 
 from ._axes import METADATA_KEY, layer_for

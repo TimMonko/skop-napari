@@ -22,9 +22,8 @@ from collections.abc import Callable
 from typing import Any
 
 from magicgui.widgets import ComboBox, Container, Label
+from opspec.op import OpSpec, ParamSpec
 from qtpy.QtWidgets import QSizePolicy
-
-from skop import OpSpec, ParamSpec
 
 from ._widget import Inputs, build_inputs, param_docs
 
