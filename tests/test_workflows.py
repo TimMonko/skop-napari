@@ -76,7 +76,7 @@ def test_the_call_names_every_parameter_the_workflow_declares(panel):
 
 
 def test_changing_a_choice_redraws_that_stage(panel):
-    panel._picker.value = "deconvolve: deconvolve_with_psf"
+    panel._picker.value = "scikit-ops › deconvolve: deconvolve_with_psf"
     stage = panel._inputs.extra[0]
     first, second = stage._param.choices.labels[:2]
 
@@ -92,7 +92,7 @@ def test_changing_a_choice_redraws_that_stage(panel):
 
 
 def test_the_chosen_op_reaches_the_call(panel):
-    panel._picker.value = "mask: detect_then_mask"
+    panel._picker.value = "scikit-ops › mask: detect_then_mask"
     detector, masker = panel._inputs.extra
     for label in detector._param.choices.labels:
         detector._combo.value = label
@@ -103,7 +103,7 @@ def test_the_chosen_op_reaches_the_call(panel):
 def test_the_combo_says_where_the_choice_will_run(panel):
     """Picking "gpu" for the first time means an environment build, and that
     is worth knowing before pressing Run rather than four minutes after."""
-    panel._picker.value = "deconvolve: deconvolve_with_psf"
+    panel._picker.value = "scikit-ops › deconvolve: deconvolve_with_psf"
     stage = panel._inputs.extra[1]
     stage._combo.value = "gpu"
     assert "cupy" in stage._combo.tooltip

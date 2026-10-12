@@ -16,6 +16,7 @@ serves both, differing only in which half of the collection it offers.
 
 from __future__ import annotations
 
+import importlib.metadata
 import logging
 import os
 import re
@@ -83,8 +84,41 @@ _log = logging.getLogger("skop_napari")
 _LOG_RECORD = re.compile(r"^\s*(TRACE|DEBUG|INFO|WARN|WARNING|ERROR)\b")
 
 
-def _label_for(spec: OpSpec) -> str:
-    """A human-facing name for an op, e.g. 'segment: stardist2d'.
+def _collections() -> dict[str, str]:
+    """Every installed collection of ops: its name, and the package of its ops.
+
+    A collection says it is one in its own pyproject.toml, and is listed once
+    installed::
+
+        [project.entry-points."opspec.collections"]
+        tnia-ops = "tnia_ops"
+
+    SKOP_NAPARI_COLLECTION narrows the list to some of them, by name and
+    comma-separated, e.g. SKOP_NAPARI_COLLECTION=tnia-ops.
+    """
+    found = {
+        entry.name: entry.value
+        for entry in importlib.metadata.entry_points(group="opspec.collections")
+    }
+    wanted = os.environ.get("SKOP_NAPARI_COLLECTION")
+    if not wanted:
+        return found
+    names = [name.strip() for name in wanted.split(",") if name.strip()]
+    unknown = [name for name in names if name not in found]
+    if unknown:
+        raise ValueError(
+            f"SKOP_NAPARI_COLLECTION names {', '.join(unknown)}, which is not "
+            f"installed. Installed: {', '.join(sorted(found)) or 'none'}."
+        )
+    return {name: found[name] for name in names}
+
+
+def _label_for(spec: OpSpec, package: str, collection: str) -> str:
+    """A human-facing name for an op, e.g. 'scikit-ops › segment: stardist2d'.
+
+    The collection comes first, always, so the same op keeps the same label
+    however many collections are loaded, and two collections' ops of the same
+    name stay apart.
 
     The ``workflows.`` prefix is stripped rather than shown. Workflows live in
     their own tree so that a person reading the source can see what has been
@@ -93,11 +127,12 @@ def _label_for(spec: OpSpec) -> str:
     what the label is for: 'mask: detect_then_mask' sits next to the mask ops
     it belongs with.
     """
-    path = spec.module.removeprefix("skop.ops.").removeprefix("workflows.")
+    path = spec.module.removeprefix(f"{package}.").removeprefix("workflows.")
     namespace = path.split(".")[0]
-    return (
+    name = (
         spec.function if namespace == spec.function else f"{namespace}: {spec.function}"
     )
+    return f"{collection} › {name}"
 
 
 def _where(spec: OpSpec) -> str:
@@ -262,12 +297,18 @@ class OpsPanel(Container):
         self._tile_plan: TilePlan | None = None
         self._tile_problem: str | None = None
 
-        self._specs, self._failures = discover()
-        self._by_label = {
-            _label_for(s): s
-            for s in self._specs
-            if s.is_workflow is self.shows_workflows
-        }
+        self._specs: list[OpSpec] = []
+        self._failures = []
+        self._by_label = {}
+        for collection, package in _collections().items():
+            specs, failures = discover(package)
+            self._specs += specs
+            self._failures += failures
+            self._by_label |= {
+                _label_for(s, package, collection): s
+                for s in specs
+                if s.is_workflow is self.shows_workflows
+            }
 
         self._picker = ComboBox(
             name="op",
