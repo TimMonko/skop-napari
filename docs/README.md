@@ -1,4 +1,4 @@
-# skop-napari documentation
+# napari-skopkit documentation
 
 Same convention as [scikit-ops](https://github.com/apposed/scikit-ops):
 

@@ -5,7 +5,7 @@
 magicgui is not napari. It renders widgets for any Qt application, and the bulk
 of what this package does — turn an `OpSpec` into a form — needs magicgui and
 nothing else. So: should there be a `skop-magicgui` package underneath
-`skop-napari`, for hosts that want op forms without a viewer?
+`napari-skopkit`, for hosts that want op forms without a viewer?
 
 The instinct to say yes is strong, because the layering is real. It was still
 the wrong call.
@@ -19,7 +19,7 @@ the wrong call.
   That is what a second front end actually needs, and it needs it whether or
   not that front end uses magicgui at all. A Fiji front end reads `Role` and
   has never heard of magicgui.
-- The magicgui-but-not-napari code lives in `src/skop_napari/_widget.py`, a
+- The magicgui-but-not-napari code lives in `src/napari_skopkit/_widget.py`, a
   module that **imports nothing from napari** and is enforced to stay that way
   by the one seam described below.
 

@@ -19,10 +19,9 @@ from __future__ import annotations
 from typing import Any
 
 from magicgui.widgets import ComboBox, Container, Label, LineEdit
+from opspec.op import OpSpec, ParamSpec
+from opspec.plan import ITERATE, PASS, SELECT, AdaptationPlan, canonical, plan
 from psygnal import Signal
-
-import skop
-from skop import AdaptationPlan, OpSpec, ParamSpec
 
 from . import _axes
 
@@ -157,10 +156,15 @@ class _Row(Container):
                 # spatial slots at whatever is on screen. Re-planned rather
                 # than patched, because the mapping decides what is left over
                 # and hence what the dispositions apply to.
+                # napari does not count an RGB layer's colour axis as a
+                # dimension, so it is never on screen; leave it out, or the
+                # viewer's two axes land on the last two, x and colour.
+                layer = _axes.layer_for(viewer, data)
+                rgb = bool(getattr(layer, "rgb", False))
                 guided = _guided(
                     plan.mapping,
                     self.param.axes.slots,
-                    _axes.displayed(viewer, len(axes)),
+                    _axes.displayed(viewer, len(axes) - rgb),
                     len(axes),
                 )
                 if guided != plan.mapping:
@@ -191,7 +195,7 @@ class _Row(Container):
         viewer: Any,
         mapping: tuple[int | None, ...] | None,
     ) -> AdaptationPlan:
-        return skop.plan(
+        return plan(
             fn,
             self.param.name,
             data,
@@ -239,17 +243,13 @@ class _Row(Container):
                 if i in plan.mapping:
                     continue
                 options = [
-                    (f"iterate all {shape[i]}", skop.ITERATE),
-                    ("current position", skop.SELECT),
+                    (f"iterate all {shape[i]}", ITERATE),
+                    ("current position", SELECT),
                 ]
                 if self.param.axes.variadic:
-                    options.append(("hand to the op", skop.PASS))
+                    options.append(("hand to the op", PASS))
                 current = (
-                    skop.ITERATE
-                    if i in plan.iterate
-                    else skop.SELECT
-                    if i in selected
-                    else skop.PASS
+                    ITERATE if i in plan.iterate else SELECT if i in selected else PASS
                 )
                 combo = ComboBox(
                     name=f"{self.param.name}_extra{i}",
@@ -309,7 +309,11 @@ def _guided(
     takes the two innermost displayed axes, and a 3-D op in a 2-D view keeps
     its z from wherever the names put it.
     """
-    spatial = [s for s, slot in enumerate(slots) if slot.name in _SPATIAL]
+    spatial = [
+        s
+        for s, slot in enumerate(slots)
+        if slot.name and canonical(slot.name) in _SPATIAL
+    ]
     count = min(len(spatial), len(displayed))
     if not count:
         return mapping

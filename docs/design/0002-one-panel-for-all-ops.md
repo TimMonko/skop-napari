@@ -16,7 +16,7 @@ collection pleasant to work on: drop a new op file in and it appears.
 
 ## The decision
 
-One contribution, `skop_napari._panel:OpsPanel`, carrying an op picker.
+One contribution, `napari_skopkit._panel:OpsPanel`, carrying an op picker.
 Choosing an op rebuilds the input widgets below it. `napari.yaml` has one entry
 and never changes.
 

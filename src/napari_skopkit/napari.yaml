@@ -1,4 +1,4 @@
-name: skop-napari
+name: napari-skopkit
 display_name: scikit-ops
 
 # NB: four widgets, and that there is more than one is the point. napari nests a plugin's
@@ -12,24 +12,24 @@ display_name: scikit-ops
 # instead, from whatever discovery finds.
 contributions:
   commands:
-    - id: skop-napari.ops_panel
+    - id: napari-skopkit.ops_panel
       title: Ops
-      python_name: skop_napari._panel:OpsPanel
-    - id: skop-napari.workflows_panel
+      python_name: napari_skopkit._panel:OpsPanel
+    - id: napari-skopkit.workflows_panel
       title: Workflows
-      python_name: skop_napari._panel:WorkflowsPanel
-    - id: skop-napari.record_panel
+      python_name: napari_skopkit._panel:WorkflowsPanel
+    - id: napari-skopkit.record_panel
       title: Record
-      python_name: skop_napari._record:RecordPanel
-    - id: skop-napari.replay_panel
+      python_name: napari_skopkit._record:RecordPanel
+    - id: napari-skopkit.replay_panel
       title: Replay
-      python_name: skop_napari._replay:ReplayPanel
+      python_name: napari_skopkit._replay:ReplayPanel
   widgets:
-    - command: skop-napari.ops_panel
+    - command: napari-skopkit.ops_panel
       display_name: Ops
-    - command: skop-napari.workflows_panel
+    - command: napari-skopkit.workflows_panel
       display_name: Workflows
-    - command: skop-napari.record_panel
+    - command: napari-skopkit.record_panel
       display_name: Record
-    - command: skop-napari.replay_panel
+    - command: napari-skopkit.replay_panel
       display_name: Replay

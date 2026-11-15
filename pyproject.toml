@@ -3,12 +3,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "skop-napari"
+name = "napari-skopkit"
 version = "0.1.0.dev0"
 description = "Run scikit-ops ops from napari."
 license = "BSD-2-Clause"
 authors = [{name = "scikit-ops developers"}]
-readme = "README.md"
+readme = "README-pypi.md"
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Framework :: napari",
@@ -24,9 +24,14 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
 
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
-    "scikit-ops",
+    "scikit-ops>=0.1.0.dev2",
+    # Helpers for boxes and masks, from scikit-ops' repo.
+    "ophelper>=0.1.0.dev0",
+    # The runner, from scikit-ops' repo.
+    "oprunner>=0.1.0.dev0",
+    # Recording and replaying: the Record and Replay panels.
     "skop-workflows",
     "napari>=0.5",
     "magicgui>=0.8",
@@ -44,19 +49,23 @@ dev = [
 ]
 
 [project.entry-points."napari.manifest"]
-skop-napari = "skop_napari:napari.yaml"
+napari-skopkit = "napari_skopkit:napari.yaml"
 
 [project.urls]
-homepage = "https://github.com/apposed/skop-napari"
-source = "https://github.com/apposed/skop-napari"
-tracker = "https://github.com/apposed/skop-napari/issues"
+homepage = "https://github.com/apposed/napari-skopkit"
+source = "https://github.com/apposed/napari-skopkit"
+tracker = "https://github.com/apposed/napari-skopkit/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/skop_napari"]
+packages = ["src/napari_skopkit"]
 
 [tool.uv.sources]
 # Developed alongside its base package; drop this once scikit-ops is on PyPI.
 scikit-ops = { path = "../scikit-ops", editable = true }
+ophelper = { path = "../scikit-ops/ophelper", editable = true }
+oprunner = { path = "../scikit-ops/oprunner", editable = true }
+# Unpublished. Needs the branch that depends on opspec and oprunner
+# (port/opspec), not the one that depends on the scikit-ops fork.
 skop-workflows = { path = "../skop-workflows", editable = true }
 # Note: the main tip, not the 0.11 release, for PixiInstallMonitor -- it is
 # what gives an environment build real progress to show. Matches the pin in
@@ -68,7 +77,7 @@ appose = { path = "../appose-python", editable = true }
 line-length = 88
 
 [tool.ruff.lint.isort]
-known-first-party = ["skop", "skop_core", "skop_napari", "skop_visual"]
+known-first-party = ["skop", "skop_core", "skop_visual", "napari_skopkit"]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]

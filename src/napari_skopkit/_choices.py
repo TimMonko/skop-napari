@@ -22,9 +22,8 @@ from collections.abc import Callable
 from typing import Any
 
 from magicgui.widgets import ComboBox, Container, Label
+from opspec.op import OpSpec, ParamSpec
 from qtpy.QtWidgets import QSizePolicy
-
-from skop import OpSpec, ParamSpec
 
 from ._widget import Inputs, build_inputs, param_docs
 
@@ -59,6 +58,10 @@ class Stage(Container):
         self._binds = (
             frozenset(args_param.params_for.binds) if args_param else frozenset()
         )
+        # Settings the workflow defaults for the chosen op, as {"noncirc":
+        # True}. They replace the op's own defaults in the widgets.
+        default = args_param.default if args_param else None
+        self._defaults = default if isinstance(default, dict) else {}
         self._value_for = value_for
         self._annotation_for = annotation_for
         self._doc = tooltip
@@ -147,6 +150,10 @@ class Stage(Container):
             notes.append(f"Cannot run: {where} has no widget for {names}")
         return notes
 
+    def values(self) -> dict[str, Any]:
+        """The chosen op's settings, as the widgets have them."""
+        return self._inputs.values() if self._inputs else {}
+
     def contribution(self) -> dict[str, Any]:
         """This stage's slice of the workflow call."""
         args: dict[str, Any] = {self._param.name: self.op}
@@ -163,6 +170,9 @@ class Stage(Container):
             self._value_for,
             skip=lambda param: param.name in self._binds,
         )
+        for widget in self._inputs.widgets:
+            if widget.name in self._defaults:
+                widget.value = self._defaults[widget.name]
         self._box.clear()
         self._box.extend(self._inputs.widgets)
 

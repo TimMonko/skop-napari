@@ -12,12 +12,13 @@ from typing import Annotated
 
 import numpy as np
 import pytest
+from opspec.describe import OpSpec
+from opspec.op import Axes, op
+from opspec.types import ImageOf, LabelsOf
 
-from skop import Axes, OpSpec, op
-from skop.types import ImageOf, LabelsOf
+from napari_skopkit import RecordPanel, ReplayPanel
+from napari_skopkit._host import SKOP
 from skop_core import InProcess, Recorder, SimpleStore, export, save
-from skop_napari import RecordPanel, ReplayPanel
-from skop_napari._host import SKOP
 
 
 @op()
@@ -106,7 +107,7 @@ def private_settings(tmp_path, monkeypatch):
     """Recent recipes go to a file of the test's own, not the user's."""
     from qtpy.QtCore import QSettings
 
-    from skop_napari import _replay
+    from napari_skopkit import _replay
 
     path = str(tmp_path / "settings.ini")
     monkeypatch.setattr(

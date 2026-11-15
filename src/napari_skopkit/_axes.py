@@ -3,7 +3,7 @@
 skop refuses to guess this ([skop design
 0005](https://github.com/apposed/scikit-ops/blob/main/docs/design/0005-dimensional-adaptation.md)),
 and it is right to: guessing needs a viewer to guess *for*. This module is
-that guess, and it is the whole reason skop-napari can hand a `(z, y, x)`
+that guess, and it is the whole reason napari-skopkit can hand a `(z, y, x)`
 stack to a strictly 2-D op.
 
 The rungs run from "someone said so" to "the layer labels its own axes", and
@@ -36,7 +36,7 @@ from typing import Any
 #: Those are placeholders, not names, and must not be read as axis labels.
 _PLACEHOLDER = re.compile(r"^-?\d+$")
 
-#: Where skop-napari stashes a resolved or user-edited answer, so that later
+#: Where napari-skopkit stashes a resolved or user-edited answer, so that later
 #: runs -- and other plugins -- can read it back.
 METADATA_KEY = "skop_axes"
 

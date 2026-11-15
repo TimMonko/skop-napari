@@ -26,17 +26,19 @@ from typing import Any
 
 import napari.viewer
 from napari.layers import Layer
+from oprunner import Runner, discover
+from opspec.describe import OpSpec, OutputSpec
+from opspec.types import Role
 from psygnal import Signal
 from qtpy.QtCore import QTimer
 
-from skop import OpSpec, OutputSpec, Role, Runner, discover
 from skop_core import Graph, Recorder, RecordingRunner, SimpleStore
 
 from ._host import SKOP, Host
 from ._roles import layer_args_for, layer_type_for_role
 from ._run import resolve
 
-_log = logging.getLogger("skop_napari")
+_log = logging.getLogger("napari_skopkit")
 
 
 def step_name(spec: OpSpec, graph: Graph) -> str:
@@ -229,13 +231,13 @@ class Session:
     ) -> None:
         self.viewer = viewer
         # napari constructs the panels, so there is no call site to pass
-        # debug=True at; SKOP_NAPARI_DEBUG is the way in. It echoes the
+        # debug=True at; NAPARI_SKOPKIT_DEBUG is the way in. It echoes the
         # worker's own stdout and stderr, which is the only view of what the
         # op is doing inside its own process.
         self.runner = (
             runner
             if runner is not None
-            else Runner(debug=bool(os.environ.get("SKOP_NAPARI_DEBUG")))
+            else Runner(debug=bool(os.environ.get("NAPARI_SKOPKIT_DEBUG")))
         )
         self.store = SimpleStore(root or tempfile.mkdtemp(prefix="skop-napari-"))
         # The recorder's inner runner is the real one, so an op that names an

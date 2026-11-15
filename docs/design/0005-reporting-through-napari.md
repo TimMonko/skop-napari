@@ -59,7 +59,7 @@ Two consequences of skop's design note, realized here:
   first version did.
 - **Subscribing to progress turns on `-vv`.** So the output/error channels
   carry pixi's entire debug log. `_on_build_text` logs all of it to the
-  `skop_napari` logger and shows only lines that do not match `_LOG_RECORD`
+  `napari_skopkit` logger and shows only lines that do not match `_LOG_RECORD`
   (`^\s*(TRACE|DEBUG|INFO|WARN|WARNING|ERROR)\b`). Detail stays recoverable;
   the progress bar stays readable.
 
@@ -125,9 +125,9 @@ contract.
 
 The `README` documents three levels; they exist because of the above.
 
-1. `logging.getLogger("skop_napari")` at INFO — what ran, with what shapes and
+1. `logging.getLogger("napari_skopkit")` at INFO — what ran, with what shapes and
    dtypes, and which layers came back.
-2. `SKOP_NAPARI_DEBUG=1` → `Runner(debug=True)` — the worker's own stdout and
+2. `NAPARI_SKOPKIT_DEBUG=1` → `Runner(debug=True)` — the worker's own stdout and
    stderr. napari constructs the widget itself, so there is no call site at
    which to pass `debug=True`; an environment variable is the only way in.
 3. Run the op in a plain Python session, removing this package entirely.

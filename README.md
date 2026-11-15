@@ -1,4 +1,4 @@
-# skop-napari
+# napari-skopkit
 
 Run [scikit-ops](https://github.com/apposed/scikit-ops) ops from napari.
 
@@ -52,18 +52,18 @@ two rows of counts.
 ## Layout
 
 ```
-src/skop_napari/_roles.py    Role -> napari type, and laying boxes/masks out
-src/skop_napari/_axes.py     working out what a layer's axes are (no Qt)
-src/skop_napari/_plans.py    the axes field, slot mapping and axis dispositions
-src/skop_napari/_widget.py   OpSpec -> magicgui widgets (imports no napari)
-src/skop_napari/_choices.py  a workflow's stages: a combo per chosen op
-src/skop_napari/_run.py      running an op off the GUI thread
-src/skop_napari/_panel.py    the Ops and Workflows widgets
-src/skop_napari/_host.py     recording bookkeeping: layers <-> runs (no napari)
-src/skop_napari/_session.py  one recorder, store and runner per viewer
-src/skop_napari/_graph.py    the Record panel's graph canvas
-src/skop_napari/_record.py   the Record widget
-src/skop_napari/_replay.py   the Replay widget
+src/napari_skopkit/_roles.py    Role -> napari type, and laying boxes/masks out
+src/napari_skopkit/_axes.py     working out what a layer's axes are (no Qt)
+src/napari_skopkit/_plans.py    the axes field, slot mapping and axis dispositions
+src/napari_skopkit/_widget.py   OpSpec -> magicgui widgets (imports no napari)
+src/napari_skopkit/_choices.py  a workflow's stages: a combo per chosen op
+src/napari_skopkit/_run.py      running an op off the GUI thread
+src/napari_skopkit/_panel.py    the Ops and Workflows widgets
+src/napari_skopkit/_host.py     recording bookkeeping: layers <-> runs (no napari)
+src/napari_skopkit/_session.py  one recorder, store and runner per viewer
+src/napari_skopkit/_graph.py    the Record panel's graph canvas
+src/napari_skopkit/_record.py   the Record widget
+src/napari_skopkit/_replay.py   the Replay widget
 ```
 
 `_widget.py` deliberately imports nothing from napari: the one napari-shaped
@@ -158,14 +158,14 @@ napari (`uv run napari`) or its built-in console:
 ```python
 import logging
 logging.basicConfig(level=logging.INFO)
-logging.getLogger("skop_napari").setLevel(logging.INFO)
+logging.getLogger("napari_skopkit").setLevel(logging.INFO)
 ```
 
 **2. The worker's stdout and stderr** — what the op is doing inside its own
 process, including anything it prints:
 
 ```sh
-SKOP_NAPARI_DEBUG=1 uv run napari
+NAPARI_SKOPKIT_DEBUG=1 uv run napari
 ```
 
 napari builds this widget itself, so there is no call site at which to pass

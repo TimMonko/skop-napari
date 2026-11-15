@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from skop_napari import _axes
+from napari_skopkit import _axes
 
 
 class FakeDims:

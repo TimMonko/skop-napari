@@ -26,9 +26,9 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
+from opspec.describe import OpSpec
+from opspec.types import Array, Role
 
-from skop import OpSpec, Role
-from skop.types import Array
 from skop_core import Handle, Prepared, Recorder, Replayed
 from skop_visual import GraphView
 from skop_visual import view as build_view
@@ -36,7 +36,7 @@ from skop_visual import view as build_view
 #: The key a layer's bookkeeping lives under, in ``layer.metadata``.
 SKOP = "skop"
 
-_log = logging.getLogger("skop_napari")
+_log = logging.getLogger("napari_skopkit")
 
 
 def _new_id() -> str:

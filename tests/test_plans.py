@@ -6,8 +6,9 @@ the arithmetic underneath it, which is easier to corner here.
 
 from __future__ import annotations
 
-from skop import Slot
-from skop_napari._plans import _guided
+from opspec.op import Slot
+
+from napari_skopkit._plans import _guided
 
 
 def slots(*names):

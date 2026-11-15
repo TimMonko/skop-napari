@@ -13,9 +13,9 @@ from collections.abc import Callable
 from typing import Any
 
 from napari.qt.threading import FunctionWorker, create_worker
+from oprunner import Runner
+from opspec.op import OpSpec
 from superqt.utils import ensure_main_thread
-
-from skop import OpSpec, Runner
 
 
 def resolve(spec: OpSpec) -> Callable:
@@ -39,7 +39,10 @@ class OpRun:
         *,
         plans: dict[str, Any] | None = None,
         run_kwargs: dict[str, Any] | None = None,
-        on_progress: Callable[[str | None, int | None, int | None], None],
+        memory: int | str | None = None,
+        tiler: Any = None,
+        out: Any = None,
+        on_progress: Callable[..., None],
         on_done: Callable[[Any], None],
         on_error: Callable[[Exception], None],
         on_finish: Callable[[], None],
@@ -57,7 +60,12 @@ class OpRun:
         # dispatch, and drop anything that outlived its run.
         def relay(event: Any) -> None:
             if self._live:
-                on_progress(event.message, event.current, event.maximum)
+                on_progress(
+                    event.message,
+                    event.current,
+                    event.maximum,
+                    getattr(event, "tile", None),
+                )
 
         report = ensure_main_thread(relay)
 
@@ -70,6 +78,9 @@ class OpRun:
                 fn,
                 kwargs,
                 plans=plans or None,
+                memory=memory,
+                tiler=tiler,
+                out=out,
                 on_progress=report,
                 on_start=self._started,
                 **(run_kwargs or {}),
@@ -107,7 +118,7 @@ class OpRun:
     def cancel(self) -> None:
         """Ask the op to stop.
 
-        Cooperative: the op stops at its next ``skop.cancel_requested()``
+        Cooperative: the op stops at its next ``cancel_requested()``
         check, and returns whatever it had computed by then. An op that never
         checks runs to completion.
         """

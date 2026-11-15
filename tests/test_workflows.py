@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from skop_napari import OpsPanel, WorkflowsPanel
+from napari_skopkit import OpsPanel, WorkflowsPanel
 
 
 @pytest.fixture
@@ -76,7 +76,7 @@ def test_the_call_names_every_parameter_the_workflow_declares(panel):
 
 
 def test_changing_a_choice_redraws_that_stage(panel):
-    panel._picker.value = "deconvolve: deconvolve_with_psf"
+    panel._picker.value = "scikit-ops › deconvolve: deconvolve_with_psf"
     stage = panel._inputs.extra[0]
     first, second = stage._param.choices.labels[:2]
 
@@ -92,7 +92,7 @@ def test_changing_a_choice_redraws_that_stage(panel):
 
 
 def test_the_chosen_op_reaches_the_call(panel):
-    panel._picker.value = "mask: detect_then_mask"
+    panel._picker.value = "scikit-ops › mask: detect_then_mask"
     detector, masker = panel._inputs.extra
     for label in detector._param.choices.labels:
         detector._combo.value = label
@@ -103,7 +103,7 @@ def test_the_chosen_op_reaches_the_call(panel):
 def test_the_combo_says_where_the_choice_will_run(panel):
     """Picking "gpu" for the first time means an environment build, and that
     is worth knowing before pressing Run rather than four minutes after."""
-    panel._picker.value = "deconvolve: deconvolve_with_psf"
+    panel._picker.value = "scikit-ops › deconvolve: deconvolve_with_psf"
     stage = panel._inputs.extra[1]
     stage._combo.value = "gpu"
     assert "cupy" in stage._combo.tooltip
@@ -115,3 +115,26 @@ def test_notes_say_a_workflow_runs_on_the_host(panel):
     for label in _labels(panel):
         panel._picker.value = label
         assert "host" in panel._notes.value
+
+
+def test_a_workflow_that_deconvolves_offers_tiling(panel):
+    import numpy as np
+
+    panel._viewer.add_image(np.zeros((32, 512, 512), np.float32), name="volume")
+    panel.reset_choices()  # not docked, so napari doesn't do it
+    panel._picker.value = next(
+        label
+        for label, spec in panel._by_label.items()
+        if spec.function == "deconvolve_with_psf"
+    )
+    decon = next(s for s in panel._inputs.extra if s.name == "decon_op")
+    # The workflow's own default for its deconvolver: tiles need it.
+    assert decon.values()["noncirc"] is True
+    # The PSF does not exist until the workflow runs, so the plan shown is
+    # estimated with 10; the run leaves the overlap to the op.
+    assert not panel._memory_box._explicitly_hidden
+    assert panel._tile_plan.overlap == 10
+    assert panel._tiler()[0].overlap is None
+    panel._memory.value = "200M"
+    assert panel._tile_plan.calls > 1
+    assert "estimated" in panel._tiles.value

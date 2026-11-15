@@ -22,8 +22,7 @@ from typing import Any
 
 from magicgui.types import Undefined
 from magicgui.widgets import Widget, create_widget
-
-from skop import OpSpec, ParamSpec
+from opspec.op import OpSpec, ParamSpec
 
 
 def _unconverted(param: ParamSpec, value: Any) -> Any:

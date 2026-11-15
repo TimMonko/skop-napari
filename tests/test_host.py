@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from opspec.describe import OpSpec
+from opspec.op import op
+from opspec.types import ImageOf, LabelsOf, Role
 
-from skop import OpSpec, Role, op
-from skop.types import ImageOf, LabelsOf
+from napari_skopkit._host import SKOP, Host, UnknownLayer, UnknownOp
 from skop_core import InProcess, Recorder, SimpleStore
-from skop_napari._host import SKOP, Host, UnknownLayer, UnknownOp
 
 
 @op()

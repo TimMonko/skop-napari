@@ -31,6 +31,7 @@ from typing import Any
 import napari.viewer
 from napari.qt.threading import create_worker
 from napari.utils.notifications import show_error
+from opspec.describe import OpSpec
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QBrush, QColor
 from qtpy.QtWidgets import (
@@ -49,7 +50,6 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from skop import OpSpec
 from skop_core import export, save
 from skop_visual import EDITED, KEPT, SIGNALS, Node, layout, lineage
 
@@ -58,7 +58,7 @@ from ._host import SKOP
 from ._roles import input_layer_types
 from ._session import Session, session_for
 
-_log = logging.getLogger("skop_napari")
+_log = logging.getLogger("napari_skopkit")
 
 #: The table's columns. The first is the Produce tick.
 # State comes right after the step: in a narrow dock the rest scrolls, and what

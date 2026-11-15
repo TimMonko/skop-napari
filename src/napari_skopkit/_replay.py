@@ -26,6 +26,7 @@ import napari.viewer
 from magicgui.widgets import Container
 from napari.qt.threading import create_worker
 from napari.utils.notifications import show_error
+from opspec.describe import NDARRAY, PATH, OpSpec, ParamSpec, type_spec
 from psygnal import Signal
 from qtpy.QtCore import QSettings, Qt
 from qtpy.QtWidgets import (
@@ -46,7 +47,6 @@ from qtpy.QtWidgets import (
 )
 from superqt.utils import ensure_main_thread
 
-from skop import NDARRAY, PATH, OpSpec, ParamSpec, type_spec
 from skop_core import Prepared, Replayed, RootNeed, load, prepare, revive
 
 from ._axes import resolve
@@ -56,7 +56,7 @@ from ._roles import annotation_for, input_layer_types, value_for
 from ._session import Session, session_for
 from ._widget import Inputs, build_inputs
 
-_log = logging.getLogger("skop_napari")
+_log = logging.getLogger("napari_skopkit")
 
 #: What an array input's dropdown says while no layer is chosen.
 _UNCHOSEN = "(choose a layer)"

@@ -13,7 +13,7 @@ import contextlib
 import numpy as np
 import pytest
 
-from skop_napari import OpsPanel
+from napari_skopkit import OpsPanel
 
 
 @contextlib.contextmanager
@@ -167,7 +167,7 @@ def test_progress_reaches_the_panel_and_cancel_stops_the_op(panel, qtbot):
         # Progress is reported from the worker process, relayed by an Appose
         # listener thread, and must arrive on the GUI thread to be shown.
         qtbot.waitUntil(
-            lambda: "Summing chunk" in (panel._progress.label or ""),
+            lambda: "Summing chunk" in (panel._status.value or ""),
             timeout=120_000,
         )
         assert panel._run is not None
@@ -207,7 +207,7 @@ def test_build_progress_drives_the_progress_bar(panel):
     # PixiInstallMonitor reports determinate progress per phase. These are
     # the real titles it emits, in order.
     panel._on_build_progress("Installing conda packages", 0, 30)
-    assert panel._progress.label == "Installing conda packages"
+    assert panel._status.value == "Installing conda packages"
     assert panel._progress.max == 30
 
     panel._on_build_progress("Installing conda packages", 21, 30)
@@ -217,17 +217,17 @@ def test_build_progress_drives_the_progress_bar(panel):
 def test_build_log_noise_is_logged_but_not_shown(panel, caplog):
     # Appose runs pixi under -vv to drive the monitor, so most of the stderr
     # stream is pixi's debug log rather than status worth showing.
-    with caplog.at_level("INFO", logger="skop_napari"):
+    with caplog.at_level("INFO", logger="napari_skopkit"):
         panel._on_build_text(
             "DEBUG pixi_config: Loading config from /etc/pixi/config.toml\n"
             " INFO pixi_core::lock_file::update: Installed environment\n"
         )
-    assert panel._progress.label == ""
+    assert panel._status.value == ""
     assert "pixi_config" in caplog.text  # Still recoverable from the log.
 
     # A human-facing line does reach the bar.
     panel._on_build_text("✔ The default environment has been installed.\n")
-    assert panel._progress.label == "✔ The default environment has been installed."
+    assert panel._status.value == "✔ The default environment has been installed."
 
 
 def test_build_callbacks_are_registered_on_the_runner(panel):
@@ -244,7 +244,7 @@ def test_build_text_crosses_from_the_build_thread_to_the_gui(panel, qtbot):
     subscriber = panel._runner._build_error[0]
     threading.Thread(target=subscriber, args=("✔ installed\n",)).start()
 
-    qtbot.waitUntil(lambda: panel._progress.label == "✔ installed", timeout=10_000)
+    qtbot.waitUntil(lambda: panel._status.value == "✔ installed", timeout=10_000)
 
 
 # -- axis awareness --------------------------------------------------------
@@ -513,8 +513,9 @@ def test_boxes_are_reshaped_but_never_axis_labelled(panel):
     makes it work is indirect -- reshaping (N, 4) to (N, 2, 2) is what stops
     the axis count matching.
     """
-    from skop import OutputSpec, Role
-    from skop_napari._roles import layer_args_for
+    from opspec.op import OutputSpec, Role
+
+    from napari_skopkit._roles import layer_args_for
 
     boxes = np.array([[1.0, 2.0, 5.0, 6.0], [3.0, 4.0, 9.0, 8.0]], dtype=np.float32)
     output = OutputSpec(name="boxes", type=np.ndarray, role=Role.boxes)
@@ -572,8 +573,9 @@ def test_the_mask_view_chooser_appears_only_for_ops_that_return_masks(panel):
 
 
 def test_mask_outputs_are_projected_the_way_the_chooser_says(panel):
-    from skop import OutputSpec, Role
-    from skop_napari._roles import layer_args_for, layer_type_for
+    from opspec.op import OutputSpec, Role
+
+    from napari_skopkit._roles import layer_args_for, layer_type_for
 
     # A big mask with a small one drawn inside it: the case the projection
     # strategies actually differ on.
@@ -611,8 +613,9 @@ def test_the_3d_stack_gets_an_adjustable_z_spacing(panel):
     shows nothing, which is what the default of 10 is for. y and x stay at 1,
     matching the image the masks were found in.
     """
-    from skop import OutputSpec, Role
-    from skop_napari._roles import layer_args_for
+    from opspec.op import OutputSpec, Role
+
+    from napari_skopkit._roles import layer_args_for
 
     stack = np.zeros((3, 10, 10), dtype=np.uint8)
     stack[0, 0:8, 0:8] = 1
@@ -647,3 +650,121 @@ def test_the_spacing_spinner_follows_the_view_chooser(panel):
 
     panel._mask_view.value = "2D labels (largest object on top)"
     assert panel._z_spacing._explicitly_hidden
+
+
+# -- tiling to a memory budget -----------------------------------------------
+
+
+def _choose_op(panel, name):
+    """Choose an op by its full name, for a function name shared by two."""
+    panel._picker.value = next(
+        label for label, spec in panel._by_label.items() if spec.name == name
+    )
+
+
+def test_only_ops_that_can_be_tiled_offer_a_memory_budget(panel):
+    # On magicgui's intent flag, not .visible: see the mask view test above.
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    assert not panel._memory_box._explicitly_hidden
+    _choose(panel, "quadrants")
+    assert panel._memory_box._explicitly_hidden
+
+
+def test_a_budget_that_cannot_work_blocks_the_run(panel):
+    panel._viewer.add_image(np.zeros((24, 60, 80), dtype=np.uint8), name="volume")
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    panel._memory.value = "lots"
+    assert not panel._button.enabled
+    assert "Cannot run: memory budget" in panel._notes.value
+    panel._memory.value = ""
+    assert panel._button.enabled
+
+
+def test_a_memory_budget_runs_the_op_in_tiles(panel, qtbot):
+    data = np.random.default_rng(0).integers(0, 255, (24, 60, 80)).astype(np.uint8)
+    panel._viewer.add_image(data, name="volume")
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    panel._memory.value = "200K"
+    # Said before anything runs, so the user knows what they are getting.
+    assert not panel._tiles._explicitly_hidden
+    assert "overlap 4;" in panel._tiles.value
+    assert int(panel._tiles.value.split()[0]) > 1
+
+    with qtbot.waitSignal(panel.finished, timeout=300_000):
+        panel._start()
+
+    result = next(layer for layer in panel._viewer.layers if "gaussian" in layer.name)
+    assert result.data.shape == data.shape
+    # A numpy layer gets the runner's own default, not a zarr.
+    assert type(result.data).__module__.split(".")[0] != "zarr"
+
+
+def test_the_plan_is_shown_even_for_one_tile_and_off_hides_it(panel):
+    panel._viewer.add_image(np.zeros((24, 60, 80), dtype=np.uint8), name="volume")
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    # Empty: the runner's default, shown in the box; a small volume is one
+    # tile, and the line still says what it needs.
+    assert panel._memory.native.placeholderText().startswith("auto: ")
+    assert not panel._tiles._explicitly_hidden
+    assert panel._tiles.value.startswith("1 tile")
+    assert "needs" in panel._tiles.value
+    panel._memory.value = "off"
+    assert panel._tiles._explicitly_hidden
+    assert not panel._tiler()[0].enabled
+
+
+def test_tile_size_and_overlap_can_be_set_by_hand(panel):
+    panel._viewer.add_image(np.zeros((24, 60, 80), dtype=np.uint8), name="volume")
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    # What the budget would choose is shown in the empty fields.
+    assert panel._tile_size.native.placeholderText().startswith("auto: ")
+    panel._tile_size.value = "24 30 40"
+    panel._overlap.value = "2"
+    assert panel._tile_plan.tile_shape == (24, 30, 40)
+    assert panel._tile_plan.overlap == 2
+    assert panel._tiles.value.startswith("4 tiles")
+    panel._tile_size.value = "30 40"
+    assert not panel._button.enabled
+    assert "tile size needs 3 numbers" in panel._notes.value
+
+
+def test_a_tiled_run_on_a_zarr_writes_a_zarr(panel, qtbot, tmp_path):
+    zarr = pytest.importorskip("zarr")
+    data = np.random.default_rng(0).integers(0, 255, (24, 60, 80)).astype(np.uint8)
+    source = zarr.create_array(str(tmp_path / "in.zarr"), data=data, chunks=(4, 60, 80))
+    panel._viewer.add_image(source, name="volume")
+    _choose_op(panel, "skop.ops.smooth:gaussian")
+    panel._memory.value = "200K"
+    tile_shape = panel._tile_plan.tile_shape
+
+    with qtbot.waitSignal(panel.finished, timeout=300_000):
+        panel._start()
+
+    result = next(layer for layer in panel._viewer.layers if "gaussian" in layer.name)
+    assert isinstance(result.data, zarr.Array)
+    assert result.data.chunks == tile_shape
+    # The same numbers an untiled run on plain numpy gives.
+    from skop.ops.smooth import gaussian
+
+    whole = panel._runner.run(gaussian, image=data, memory="off")
+    np.testing.assert_allclose(result.data[:], whole, rtol=0, atol=1e-5)
+
+
+def test_a_tiled_run_shows_a_bar_for_each_of_its_last_few_tiles(panel):
+    def tile(number):
+        panel._on_progress(f"Tile {number} of 6", number - 1, 6, (number, 6))
+        panel._on_progress("Iteration 1 of 2", 1, 2)
+
+    for number in range(1, 5):
+        tile(number)
+    assert [bar.label for bar in panel._tile_bars] == [
+        f"tile {n} of 6" for n in range(1, 5)
+    ]
+    # The four are full, so tile 5 starts again with a bar of its own.
+    tile(5)
+    assert [bar.label for bar in panel._tile_bars] == ["tile 5 of 6"]
+    assert (panel._tile_bars[-1].value, panel._tile_bars[-1].max) == (1, 2)
+    assert (panel._progress.value, panel._progress.max) == (4, 6)
+    assert panel._status.value == "Tile 5 of 6: Iteration 1 of 2"
+    panel._on_finish()
+    assert len(panel._tile_bars) == 0

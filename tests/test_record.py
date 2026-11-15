@@ -19,13 +19,14 @@ from typing import Annotated
 
 import numpy as np
 import pytest
+from opspec.describe import OpSpec
+from opspec.op import Choices, op
+from opspec.runtime import run as run_op
 from qtpy.QtCore import Qt
 
-import skop
-from skop import Choices, OpSpec, op
-from skop_napari import OpsPanel, RecordPanel
-from skop_napari._host import SKOP, UnknownLayer
-from skop_napari._session import session_for
+from napari_skopkit import OpsPanel, RecordPanel
+from napari_skopkit._host import SKOP, UnknownLayer
+from napari_skopkit._session import session_for
 
 
 @op()
@@ -53,7 +54,7 @@ def offset(image: np.ndarray, shift: float = 10.0) -> np.ndarray:
 @op()
 def scale_then_offset(image: np.ndarray) -> np.ndarray:
     """A workflow: calls two ops through skop.run, rather than being one."""
-    return skop.run(offset, {"image": skop.run(scale, {"image": image})})
+    return run_op(offset, {"image": run_op(scale, {"image": image})})
 
 
 @op()
@@ -62,7 +63,7 @@ def either_then_offset(
     first: Annotated[Callable, Choices(scale=scale, offset=offset)] = scale,
 ) -> np.ndarray:
     """A workflow handed an op: which one to run first is a parameter."""
-    return skop.run(offset, {"image": skop.run(first, {"image": image})})
+    return run_op(offset, {"image": run_op(first, {"image": image})})
 
 
 @op(env="demo")
@@ -714,7 +715,7 @@ def test_keeping_an_edit_stores_it_and_stales_what_read_it(viewer, panel):
 
 
 def test_a_redrawn_box_output_is_laid_out_as_rectangles(viewer, panel):
-    from skop import Role
+    from opspec.types import Role
 
     display = panel._session.display
     boxes = np.array([[1.0, 2.0, 5.0, 6.0], [0.0, 0.0, 3.0, 3.0]])

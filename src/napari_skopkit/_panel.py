@@ -7,7 +7,7 @@ losing the ability to drop a new op into the collection and see it appear.
 The napari team is working on dynamic registration; when it lands, this file
 is what gets split up.
 
-There are two widgets, not one, and the second is what gets skop-napari a
+There are two widgets, not one, and the second is what gets napari-skopkit a
 submenu: napari builds ``Plugins > scikit-ops > ...`` as soon as a plugin
 contributes more than one widget, and leaves a single one flat. Ops and
 workflows are the split worth having -- a workflow is an op, so one class
@@ -16,8 +16,12 @@ serves both, differing only in which half of the collection it offers.
 
 from __future__ import annotations
 
+import importlib.metadata
 import logging
+import os
 import re
+import tempfile
+from pathlib import Path
 from typing import Any
 
 import napari.viewer
@@ -32,13 +36,16 @@ from magicgui.widgets import (
 )
 from napari.layers import Layer
 from napari.utils.notifications import notification_manager, show_error
+from oprunner import Runner, discover
+from oprunner._tiling import DEFAULT_FRACTION, Tiler, default_budget
+from opspec.op import OpSpec, Role
+from opspec.tiling import TilePlan, parse_bytes
 from psygnal import Signal
 from superqt.utils import ensure_main_thread
 
-from skop import OpSpec, Role, Runner, discover
 from skop_core import outputs_of
 
-from ._axes import METADATA_KEY
+from ._axes import METADATA_KEY, layer_for
 from ._choices import is_workflow_plumbing, stages_for
 from ._plans import Adaptations
 from ._roles import (
@@ -74,14 +81,47 @@ _GENERIC = frozenset(
     }
 )
 
-_log = logging.getLogger("skop_napari")
+_log = logging.getLogger("napari_skopkit")
 
 # A verbose-log line from the build tool, e.g. "DEBUG pixi_config: ...".
 _LOG_RECORD = re.compile(r"^\s*(TRACE|DEBUG|INFO|WARN|WARNING|ERROR)\b")
 
 
-def _label_for(spec: OpSpec) -> str:
-    """A human-facing name for an op, e.g. 'segment: stardist2d'.
+def _collections() -> dict[str, str]:
+    """Every installed collection of ops: its name, and the package of its ops.
+
+    A collection says it is one in its own pyproject.toml, and is listed once
+    installed::
+
+        [project.entry-points."opspec.collections"]
+        tnia-ops = "tnia_ops"
+
+    NAPARI_SKOPKIT_COLLECTION narrows the list to some of them, by name and
+    comma-separated, e.g. NAPARI_SKOPKIT_COLLECTION=tnia-ops.
+    """
+    found = {
+        entry.name: entry.value
+        for entry in importlib.metadata.entry_points(group="opspec.collections")
+    }
+    wanted = os.environ.get("NAPARI_SKOPKIT_COLLECTION")
+    if not wanted:
+        return found
+    names = [name.strip() for name in wanted.split(",") if name.strip()]
+    unknown = [name for name in names if name not in found]
+    if unknown:
+        raise ValueError(
+            f"NAPARI_SKOPKIT_COLLECTION names {', '.join(unknown)}, which is not "
+            f"installed. Installed: {', '.join(sorted(found)) or 'none'}."
+        )
+    return {name: found[name] for name in names}
+
+
+def _label_for(spec: OpSpec, package: str, collection: str) -> str:
+    """A human-facing name for an op, e.g. 'scikit-ops › segment: stardist2d'.
+
+    The collection comes first, always, so the same op keeps the same label
+    however many collections are loaded, and two collections' ops of the same
+    name stay apart.
 
     The ``workflows.`` prefix is stripped rather than shown. Workflows live in
     their own tree so that a person reading the source can see what has been
@@ -90,11 +130,12 @@ def _label_for(spec: OpSpec) -> str:
     what the label is for: 'mask: detect_then_mask' sits next to the mask ops
     it belongs with.
     """
-    path = spec.module.removeprefix("skop.ops.").removeprefix("workflows.")
+    path = spec.module.removeprefix(f"{package}.").removeprefix("workflows.")
     namespace = path.split(".")[0]
-    return (
+    name = (
         spec.function if namespace == spec.function else f"{namespace}: {spec.function}"
     )
+    return f"{collection} › {name}"
 
 
 def _where(spec: OpSpec) -> str:
@@ -110,6 +151,99 @@ def _describe(value: Any) -> str:
     if shape is not None:
         return f"{type(value).__name__}{tuple(shape)} {getattr(value, 'dtype', '')}"
     return repr(value)
+
+
+def _follow(layer: Layer, source: Layer | None) -> None:
+    """Put an output where its input is: the same scale and offset.
+
+    An op works in the input's pixels, so its boxes and labels come back in
+    them. A layer shown at 8x scale -- level 3 of a pyramid, say -- would
+    otherwise get its outputs drawn at 1x, squeezed into the top-left corner.
+    An output with more dimensions than its input (a stack of masks) is
+    unscaled along the extra, leading ones.
+    """
+    if source is None:
+        return
+    extra = max(0, layer.ndim - source.ndim)
+    scale = tuple(source.scale)[-layer.ndim :]
+    translate = tuple(source.translate)[-layer.ndim :]
+    layer.scale = (1.0,) * extra + scale
+    layer.translate = (0.0,) * extra + translate
+
+
+def _zarr_out_for(data: Any, plan: TilePlan) -> Any:
+    """Where a tiled run on a zarr puts its result: another zarr.
+
+    A run that has to be tiled has a result too big for memory, and an input
+    that is a zarr says zarr is what this user works in. So the result is
+    one too, in a temporary folder, chunked the way it is tiled, and shown
+    as lazily as the input was. Made once the result's dtype is known, which
+    is why this hands the runner a function rather than an array.
+
+    Any other input returns None, and the runner's own default stands.
+    """
+    if type(data).__module__.split(".")[0] != "zarr":
+        return None
+    import zarr
+
+    path = Path(tempfile.mkdtemp(prefix="skop-tiled-")) / "result.zarr"
+
+    def make(shape: tuple[int, ...], dtype: Any) -> Any:
+        chunks = tuple(min(c, n) for c, n in zip(plan.tile_shape, shape))
+        return zarr.open_array(
+            str(path), mode="w", shape=shape, dtype=dtype, chunks=chunks
+        )
+
+    return make
+
+
+#: How many tiles a run shows a bar for at once. A big image may be
+#: hundreds of tiles; when this many are full, they are cleared.
+TILE_BARS = 4
+
+#: The overlap a workflow's plan is estimated with when the field is empty.
+#: The op's own overlap may come from a PSF the workflow makes partway
+#: through, after the panel has planned. The run uses the op's own, from the
+#: real PSF. 10 is what clij2-fft and tnia-python use.
+WORKFLOW_OVERLAP = 10
+
+
+def _tile_line(plan: TilePlan) -> str:
+    """The plan in one line: how many tiles, and what each needs."""
+    line = f"{plan.summary}; needs {_size(plan.peak)} of {_size(plan.budget)}"
+    return line + " -- over the budget" if plan.peak > plan.budget else line
+
+
+def _numbers(text: str) -> tuple[int, ...] | None:
+    """Whole numbers typed into a field, "64 256 256" or "64x256x256"; None if empty."""
+    parts = text.replace("x", " ").replace(",", " ").split()
+    if not parts:
+        return None
+    try:
+        return tuple(int(part) for part in parts)
+    except ValueError:
+        raise ValueError(f"not whole numbers: {text.strip()!r}") from None
+
+
+def _budget_from(text: str) -> float | int | None:
+    """A memory budget as typed: empty, a share of what is free, or a size."""
+    if not text:
+        return None
+    try:
+        share = float(text)
+    except ValueError:
+        return parse_bytes(text)
+    if 0 < share <= 1:
+        return share
+    raise ValueError(f"a share of free memory is between 0 and 1, not {share}")
+
+
+def _size(n: int) -> str:
+    """Bytes as a size someone would type: 19.3G, 850M."""
+    for unit, scale in (("T", 1024**4), ("G", 1024**3), ("M", 1024**2)):
+        if n >= scale:
+            return f"{n / scale:.1f}{unit}"
+    return f"{n // 1024}K"
 
 
 def _layer_name(spec: OpSpec, output: str) -> str:
@@ -152,6 +286,11 @@ class OpsPanel(Container):
         # session: workers stay warm between invocations, which is most of why
         # running an op a second time is fast. Without a viewer there is no
         # session to share, and the panel keeps a runner of its own.
+        #
+        # napari constructs this widget itself, so there is no call site to
+        # pass debug=True at; NAPARI_SKOPKIT_DEBUG is the way in. It echoes the
+        # worker's own stdout and stderr, which is the only view of what the
+        # op is doing inside its own process.
         self._session: Session | None = (
             session_for(napari_viewer, runner=runner)
             if napari_viewer is not None
@@ -162,19 +301,29 @@ class OpsPanel(Container):
             if self._session is not None
             else runner
             if runner is not None
-            else Runner()
+            else Runner(debug=bool(os.environ.get("NAPARI_SKOPKIT_DEBUG")))
         )
         self._run: OpRun | None = None
         #: The step the run in flight was recorded as, told to us from the
         #: worker thread and read back on the GUI thread once it is done.
         self._recorded: list[str] = []
+        # How the chosen op would be tiled under the memory budget, if at all,
+        # and what is wrong with the budget, if anything.
+        self._tile_plan: TilePlan | None = None
+        self._tile_problem: str | None = None
 
-        self._specs, self._failures = discover()
-        self._by_label = {
-            _label_for(s): s
-            for s in self._specs
-            if s.is_workflow is self.shows_workflows
-        }
+        self._specs: list[OpSpec] = []
+        self._failures = []
+        self._by_label = {}
+        for collection, package in _collections().items():
+            specs, failures = discover(package)
+            self._specs += specs
+            self._failures += failures
+            self._by_label |= {
+                _label_for(s, package, collection): s
+                for s in specs
+                if s.is_workflow is self.shows_workflows
+            }
 
         self._picker = ComboBox(
             name="op",
@@ -191,6 +340,47 @@ class OpsPanel(Container):
         # already shows. Empty for an ordinary op.
         self._stages_box = Container(labels=False)
         self._adapt = Adaptations()
+        # A memory budget, offered only for ops that say how they can be cut
+        # up (@op(tile=..., peak_memory=...)). Over it, the op runs tile by
+        # tile; under it, or with the box empty, it runs whole as always.
+        self._memory = LineEdit(
+            name="memory",
+            label="memory budget",
+            value="",
+            tooltip=(
+                "Run the op in tiles that each fit this much memory: a size, "
+                "500M or 2G, or a share of what is free, 0.5. Empty: 85% of "
+                "the memory free right now, which only tiles an input too big "
+                "for it. 'off': always run whole."
+            ),
+        )
+        # A Tiler's two overrides (0017 tiling.md, "The Tiler"). Empty, each
+        # shows what would be used, and follows the budget as it changes.
+        self._tile_size = LineEdit(
+            name="tile_size",
+            label="tile size",
+            value="",
+            tooltip=(
+                "The size of each tile, one number per axis, e.g. 64 256 256. "
+                "Empty: the largest that fits the budget."
+            ),
+        )
+        self._overlap = LineEdit(
+            name="overlap",
+            label="overlap",
+            value="",
+            tooltip=(
+                "How far each tile reaches into its neighbours, in pixels: one "
+                "number, or one per axis. Empty: the op's own."
+            ),
+        )
+        # The panel is built with labels=False; this box draws the labels.
+        self._memory_box = Container(
+            labels=True,
+            widgets=[self._memory, self._tile_size, self._overlap],
+            visible=False,
+        )
+        self._tiles = Label(value="", visible=False)
         # How to show a mask collection. A display choice rather than an op
         # parameter: nothing about it reaches the model, and re-showing a
         # result a different way should not mean running SAM again. Hidden
@@ -226,7 +416,13 @@ class OpsPanel(Container):
         self._notes = Label(value="")
         self._button = PushButton(text="Run")
         self._cancel = PushButton(text="Cancel", visible=False)
+        # The op's progress messages. Not the bar's own label: this panel is
+        # built with labels=False, so magicgui never draws that.
+        self._status = Label(value="", visible=False)
         self._progress = ProgressBar(visible=False, min=0, max=0)
+        # A tiled run's last few tiles, a bar each; the main bar counts tiles.
+        self._tile_bars = Container(labels=True, visible=False)
+        self._tile: tuple[int, int] | None = None
         self._results = Container(labels=True, visible=False)
 
         super().__init__(
@@ -236,12 +432,16 @@ class OpsPanel(Container):
                 self._inputs_box,
                 self._stages_box,
                 self._adapt,
+                self._memory_box,
+                self._tiles,
                 self._mask_view,
                 self._z_spacing,
                 self._notes,
                 self._button,
                 self._cancel,
+                self._status,
                 self._progress,
+                self._tile_bars,
                 self._results,
             ],
             labels=False,
@@ -251,6 +451,9 @@ class OpsPanel(Container):
         self._mask_view.changed.connect(self._show_z_spacing)
         self._button.changed.connect(self._start)
         self._cancel.changed.connect(self._stop)
+        self._memory.changed.connect(self._replan)
+        self._tile_size.changed.connect(self._replan)
+        self._overlap.changed.connect(self._replan)
 
         # "Current position" means the position right now, not the one that
         # happened to be showing when the op was picked. Without this the
@@ -306,9 +509,18 @@ class OpsPanel(Container):
         # Which array is selected decides what can be done with it, so the
         # adaptation rows follow the layer combos rather than being computed
         # once. The rows themselves also re-plan when their axes are edited.
+        # The tile line follows the input being tiled, and whichever
+        # parameter sizes the overlap.
+        tiled = self._tiled()
+        watched = set(adaptable) | set(tiled[0].tile if tiled else ())
+        if spec.overlap and spec.overlap.param:
+            watched.add(spec.overlap.param)
         for widget in self._inputs.widgets:
-            if widget.name in adaptable:
+            if widget.name in watched:
                 widget.changed.connect(self._replan)
+        # A workflow's choosers decide which op is tiled, and on which device.
+        for stage in self._inputs.extra:
+            stage.changed.connect(self._replan)
         self._adapt.watch(self._replan)
         self._replan()
 
@@ -333,8 +545,43 @@ class OpsPanel(Container):
     def _replan(self) -> None:
         """Re-resolve axes and re-plan, then say whether the op can run."""
         self._adapt.refresh(resolve(self.spec), self._inputs.values(), self._viewer)
+        tiled = self._tiled()
+        self._memory_box.visible = tiled is not None
+        if tiled:
+            device = tiled[0].peak_memory.device
+            free = "GPU memory" if device == "gpu" else "free memory"
+            budget = default_budget(DEFAULT_FRACTION, device)
+            self._memory.native.setPlaceholderText(
+                f"auto: {_size(budget)} ({DEFAULT_FRACTION:.0%} of {free})"
+                if budget is not None
+                else f"auto: {free} unknown, so not tiled"
+            )
+        self._tile_plan, self._tile_problem = self._plan_tiles()
+        plan = self._tile_plan
+        self._tiles.value = _tile_line(plan) if plan else ""
+        if plan and self.spec.is_workflow:
+            self._tiles.value += " (estimated: the PSF is made when it runs)"
+        self._tiles.visible = plan is not None
+        if plan is not None:
+            # What would be used, in the fields the user has left empty.
+            self._tile_size.native.setPlaceholderText(
+                "auto: " + " x ".join(str(n) for n in plan.tile_shape)
+            )
+            reach = plan.overlap
+            self._overlap.native.setPlaceholderText(
+                "auto: "
+                + (
+                    " x ".join(str(n) for n in reach)
+                    if isinstance(reach, tuple)
+                    else str(reach)
+                )
+            )
         self._notes.value = self._notes_for(self._inputs, self.spec)
-        self._button.enabled = self._inputs.runnable and not self._adapt.problems
+        self._button.enabled = (
+            self._inputs.runnable
+            and not self._adapt.problems
+            and not self._tile_problem
+        )
 
     def _moved(self) -> None:
         """Re-plan when the viewer's sliders move, if that changes anything.
@@ -364,11 +611,84 @@ class OpsPanel(Container):
             notes.append(f"Cannot run: no widget for required input(s) {names}")
         notes.extend(note for stage in inputs.extra for note in stage.notes())
         notes.extend(f"Cannot run: {problem}" for problem in self._adapt.problems)
+        if self._tile_problem:
+            notes.append(f"Cannot run: memory budget: {self._tile_problem}")
         # Warnings never block a run. An op fed an axis it did not ask for is
         # the user's call to make; the panel's job is to make sure it is a
         # call they can see themselves making.
         notes.extend(f"Check: {warning}" for warning in self._adapt.warnings)
         return "\n".join(notes)
+
+    def _tiler(self, estimate: bool = False) -> tuple[Tiler | None, str | None]:
+        """The Tiler the three fields describe, or what is wrong with them.
+
+        With *estimate*, for showing a workflow's plan before it runs: an
+        empty overlap is WORKFLOW_OVERLAP.
+        """
+        text = self._memory.value.strip()
+        if text.lower() == "off":
+            return Tiler.off(), None
+        try:
+            memory = _budget_from(text)
+            tile_size = _numbers(self._tile_size.value)
+            overlap = _numbers(self._overlap.value)
+        except ValueError as exc:
+            return None, str(exc)
+        if overlap is not None and len(overlap) == 1:
+            overlap = overlap[0]
+        if overlap is None and estimate and self.spec.is_workflow:
+            overlap = WORKFLOW_OVERLAP
+        return Tiler(memory=memory, overlap=overlap, tile_shape=tile_size), None
+
+    def _tiled(self) -> tuple[OpSpec, dict[str, Any]] | None:
+        """The op that may be tiled, and its arguments as the panel has them.
+
+        The chosen op, or for a workflow, the op one of its choosers picked
+        that declares tiling hints. A workflow passes its own inputs to that
+        op by name, so the workflow's image is the one tiled.
+        """
+        spec = self.spec
+        own = self._inputs.values()
+        if spec.tile and spec.peak_memory:
+            values = {p.name: p.default for p in spec.params if not p.required}
+            return spec, {**values, **own}
+        for stage in self._inputs.extra:
+            sub = stage.spec
+            if sub.tile and sub.peak_memory:
+                values = {p.name: p.default for p in sub.params if not p.required}
+                values.update(stage.values())
+                values.update({name: own[name] for name in sub.tile if name in own})
+                return sub, values
+        return None
+
+    def _plan_tiles(self) -> tuple[TilePlan | None, str | None]:
+        """How the chosen op would be tiled, or why it can't be.
+
+        Asked of the same Tiler the run is given, so the panel says what the
+        run will do. Shown even when the whole input is one tile, so the user
+        sees what it needs. None when the op cannot be tiled, tiling is off,
+        or the budget for its device is not known.
+        """
+        tiled = self._tiled()
+        if tiled is None:
+            return None, None
+        spec, values = tiled
+        tiler, problem = self._tiler(estimate=True)
+        if problem:
+            return None, problem
+        data = values.get(spec.tile[0])
+        if not (hasattr(data, "shape") and hasattr(data, "dtype")):
+            return None, None  # No layer chosen yet, or a pyramid.
+        for name, given in (
+            ("tile size", tiler.tile_shape),
+            ("overlap", tiler.overlap),
+        ):
+            if isinstance(given, tuple) and len(given) != data.ndim:
+                return None, f"{name} needs {data.ndim} numbers, one per axis"
+        try:
+            return tiler.plan(spec, values), None
+        except ValueError as exc:
+            return None, str(exc)
 
     # -- running ---------------------------------------------------------
 
@@ -382,16 +702,26 @@ class OpsPanel(Container):
         self._button.enabled = False
         self._cancel.visible = True
         self._progress.visible = True
+        self._status.visible = True
         self._progress.max = 0  # Indeterminate until the op says otherwise.
         # There is no "build started" event, and a first run can sit silent
         # for a while before pixi says anything, so say something ourselves.
-        self._progress.label = (
+        self._status.value = (
             "Starting workflow"
             if spec.is_workflow
             else f"Preparing environment: {spec.env}"
         )
 
         args = self._inputs.values()
+        # The first input that is a layer; outputs are drawn where it is.
+        self._source_layer = next(
+            (
+                layer
+                for w in self._inputs.widgets
+                if (layer := layer_for(self._viewer, w.value)) is not None
+            ),
+            None,
+        )
         # Frozen for the duration of the run: the user is free to change the
         # selection while it works, and the outputs still belong to the plan
         # that produced them.
@@ -406,7 +736,15 @@ class OpsPanel(Container):
         )
         if any(plan.calls > 1 for plan in plans.values()):
             calls = max(plan.calls for plan in plans.values())
-            self._progress.label = f"Preparing environment: {spec.env} ({calls} runs)"
+            self._status.value = f"Preparing environment: {spec.env} ({calls} runs)"
+
+        tiler = self._tiler()[0] if self._tiled() else None
+        out = None
+        if self._tile_plan and self._tile_plan.calls > 1:
+            _log.info("Tiling: %s", _tile_line(self._tile_plan))
+            # A workflow returns several results; only an op's one goes to out.
+            if not spec.is_workflow:
+                out = _zarr_out_for(args.get(spec.tile[0]), self._tile_plan)
 
         # While a session is recording, the run goes through the listening
         # runner instead of the plain one. It is the same call either way: the
@@ -426,6 +764,8 @@ class OpsPanel(Container):
             args,
             plans=plans,
             run_kwargs=run_kwargs,
+            tiler=tiler,
+            out=out,
             on_progress=self._on_progress,
             on_done=self._on_done,
             on_error=self._on_error,
@@ -440,9 +780,34 @@ class OpsPanel(Container):
             self._run.cancel()
 
     def _on_progress(
-        self, message: str | None, current: int | None, maximum: int | None
+        self,
+        message: str | None,
+        current: int | None,
+        maximum: int | None,
+        tile: tuple[int, int] | None = None,
     ) -> None:
-        self._show_progress(message, current, maximum)
+        if tile is None:
+            self._show_progress(message, current, maximum)
+            return
+        try:
+            self._next_tile(*tile)
+        except RuntimeError:
+            if self._run is not None:  # closed mid-run; see _show_progress
+                self._run.detach()
+
+    def _next_tile(self, number: int, count: int) -> None:
+        """Start tile *number* of *count*: count it, and give it a bar."""
+        self._tile = (number, count)
+        self._progress.max = count
+        self._progress.value = number - 1
+        self._status.value = f"Tile {number} of {count}"
+        bars = self._tile_bars
+        if len(bars):
+            bars[-1].value = bars[-1].max  # tiles run one at a time
+        if len(bars) >= TILE_BARS:
+            bars.clear()
+        bars.append(ProgressBar(min=0, max=0, label=f"tile {number} of {count}"))
+        bars.visible = True
 
     # -- environment building --------------------------------------------
 
@@ -471,11 +836,16 @@ class OpsPanel(Container):
         self, message: str | None, current: int | None, maximum: int | None
     ) -> None:
         try:
+            # In a tiled run, the op's own progress is the current tile's.
+            bar = self._tile_bars[-1] if self._tile else self._progress
             if maximum:
-                self._progress.max = maximum
-                self._progress.value = current or 0
+                bar.max = maximum
+                bar.value = current or 0
             if message:
-                self._progress.label = message
+                where = (
+                    f"Tile {self._tile[0]} of {self._tile[1]}: " if self._tile else ""
+                )
+                self._status.value = where + message
         except RuntimeError:
             # The panel was closed while its op was still running, so the Qt
             # objects behind these widgets are gone. The op carries on in its
@@ -522,7 +892,9 @@ class OpsPanel(Container):
                         self._recorded[0], output.name, data, layer_type, args
                     )
                 else:
-                    self._viewer.add_layer(Layer.create(data, args, layer_type))
+                    layer = Layer.create(data, args, layer_type)
+                    _follow(layer, getattr(self, "_source_layer", None))
+                    self._viewer.add_layer(layer)
 
         self._show_scalars(scalars)
 
@@ -589,7 +961,11 @@ class OpsPanel(Container):
         self._cancel.enabled = True
         self._cancel.text = "Cancel"
         self._progress.visible = False
-        self._progress.label = ""
+        self._tile_bars.clear()
+        self._tile_bars.visible = False
+        self._tile = None
+        self._status.visible = False
+        self._status.value = ""
         self.finished.emit()
 
 

@@ -33,7 +33,7 @@ def blobs(shape: tuple[int, int] = (256, 256), count: int = 12, seed: int = 0):
 
 
 def main() -> None:
-    from skop_napari import OpsPanel, RecordPanel, WorkflowsPanel
+    from napari_skopkit import OpsPanel, RecordPanel, WorkflowsPanel
 
     viewer = napari.Viewer()
     viewer.add_image(blobs(), name="image")
