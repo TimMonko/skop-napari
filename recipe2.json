@@ -1,0 +1,56 @@
+{
+  "format": 2,
+  "targets": [
+    "median",
+    "otsu"
+  ],
+  "roots": {
+    "image": {
+      "ndim": 3,
+      "dtype": "uint16"
+    }
+  },
+  "steps": {
+    "median": {
+      "op": "skop.ops.smooth:median",
+      "inputs": {
+        "image": {
+          "root": "image"
+        }
+      },
+      "params": {
+        "radius": 1,
+        "shape": "ball"
+      }
+    },
+    "gaussian": {
+      "op": "skop.ops.smooth:gaussian",
+      "inputs": {
+        "image": {
+          "root": "image"
+        }
+      },
+      "params": {
+        "sigma": 1.0
+      }
+    },
+    "otsu": {
+      "op": "skop.ops.threshold:otsu",
+      "inputs": {
+        "image": {
+          "step": "gaussian",
+          "output": "result"
+        }
+      },
+      "params": {
+        "invert": false,
+        "label_objects": true
+      }
+    }
+  },
+  "caution": {
+    "edited": [],
+    "affected": [],
+    "kept": []
+  }
+}

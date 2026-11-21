@@ -1,0 +1,54 @@
+{
+  "format": 2,
+  "targets": [
+    "median",
+    "sobel"
+  ],
+  "roots": {
+    "image": {
+      "ndim": 2,
+      "dtype": "float64"
+    }
+  },
+  "steps": {
+    "gaussian": {
+      "op": "skop.ops.smooth:gaussian",
+      "inputs": {
+        "image": {
+          "root": "image"
+        }
+      },
+      "params": {
+        "sigma": 2.000000000000001
+      }
+    },
+    "median": {
+      "op": "skop.ops.smooth:median",
+      "inputs": {
+        "image": {
+          "step": "gaussian",
+          "output": "result"
+        }
+      },
+      "params": {
+        "radius": 1,
+        "shape": "ball"
+      }
+    },
+    "sobel": {
+      "op": "skop.ops.edges:sobel",
+      "inputs": {
+        "image": {
+          "step": "median",
+          "output": "result"
+        }
+      },
+      "params": {}
+    }
+  },
+  "caution": {
+    "edited": [],
+    "affected": [],
+    "kept": []
+  }
+}

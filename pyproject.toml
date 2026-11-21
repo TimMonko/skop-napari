@@ -31,6 +31,7 @@ dependencies = [
     "napari>=0.5",
     "magicgui>=0.8",
     "numpy",
+    "appose",
 ]
 
 [dependency-groups]
@@ -58,6 +59,7 @@ packages = ["src/skop_napari"]
 # Developed alongside its base package; drop this once scikit-ops is on PyPI.
 scikit-ops = { path = "../scikit-ops", editable = true }
 skop-workflows = { path = "../skop-workflows", editable = true }
+napari = { path = "../napari", editable = true, marker = "python_version >= '3.11'" }
 # Note: the main tip, not the 0.11 release, for PixiInstallMonitor -- it is
 # what gives an environment build real progress to show. Matches the pin in
 # scikit-ops; both move back to the registry once a release carries it.
